@@ -1,0 +1,9 @@
+[
+ {"id":"sogo-main","facility":"総合体育館","room":"メインアリーナ","areas":["１／１２面"],"pendingAreas":["全面","２／３面","１／３面"],"sports":true},
+ {"id":"sogo-sub","facility":"総合体育館","room":"サブアリーナ","areas":["１／６面"],"pendingAreas":["全面","１／２面"],"sports":true},
+ {"id":"shimin","facility":"市民体育館","room":"アリーナ","areas":["１／４面"],"pendingAreas":["全面","１／２面"],"sports":true},
+ {"id":"budokan","facility":"市民武道館","room":"第２武道場","areas":["全面"],"pendingAreas":["１／２面"],"sports":true},
+ {"id":"showa","facility":"庄和体育館","room":"アリーナ","areas":["１／６面"],"pendingAreas":["全面","１／２面"],"sports":true},
+ {"id":"chuo","facility":"中央公民館","room":"体育館","areas":["バドミントン（１面）","バドミントン（２面）"],"pendingAreas":["全面"],"sports":false},
+ {"id":"komatsu","facility":"幸松地区公民館","room":"体育室","areas":["バドミントンコート≪要飛沫感染対策≫"],"pendingAreas":["全面≪要飛沫感染対策≫"],"sports":false}
+]
