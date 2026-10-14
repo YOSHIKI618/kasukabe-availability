@@ -52,7 +52,11 @@ async function handle(req,env) {
       const owner=crypto.randomUUID();
       const r=await env.DB.prepare('INSERT INTO locks(id,owner,expires) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires=excluded.expires WHERE locks.expires<? RETURNING owner').bind('runner',owner,now+35*60000,now).first();
       if(!r)return json({error:'前の確認が実行中です'},409);
-      await mutate(env,s=>{s.lastRunner=now;s.lastRunnerSource=b.source==='github'?'github':'manual';s.runnerError=null;});
+      await mutate(env,s=>{s.lastRunner=now;s.lastRunnerSource=b.source==='github'?'github':'manual';
+        s.lastRunnerEvent=['schedule','workflow_dispatch'].includes(b.event)?b.event:'manual';
+        s.lastRunnerNotifyOnly=b.notifyOnly===true;
+        if(b.source==='github'&&b.event==='schedule'&&b.notifyOnly!==true)s.lastScheduledRunner=now;
+        s.runnerError=null;});
       const state=(await read(env)).state;
       return json({owner,retrySiteAt:state.retrySiteAt||0,conditions:state.conditions.filter(c=>c.enabled)});
     }

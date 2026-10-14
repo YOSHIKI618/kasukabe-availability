@@ -156,7 +156,9 @@ def main():
     BudgetSession.started = time.monotonic()
     api = API()
     try:
-        job = api.call('start',{'source':'github' if os.environ.get('GITHUB_ACTIONS')=='true' else 'manual'})
+        job = api.call('start',{'source':'github' if os.environ.get('GITHUB_ACTIONS')=='true' else 'manual',
+                                'event':os.environ.get('GITHUB_EVENT_NAME','manual'),
+                                'notifyOnly':os.environ.get('NOTIFY_ONLY')=='true'})
     except urllib.error.HTTPError as e:
         if e.code == 409:
             print('A previous run is active; this run was skipped.')
