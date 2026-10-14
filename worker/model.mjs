@@ -91,3 +91,17 @@ export function enqueue(state,data,now=Date.now()) {
   const pending=state.events.filter(e=>['pending','sending'].includes(e.status));
   state.events=[...state.events.filter(e=>!['pending','sending'].includes(e.status)).slice(-150),...pending];
 }
+export function compactInitial(state) {
+  const groups=new Map();
+  for(const e of state.events) {
+    if(e.status!=='pending'||e.kind!=='availability'||!e.body.includes('初回確認で空きが見つかりました'))continue;
+    const key=e.conditionId;
+    if(!groups.has(key)){groups.set(key,e);continue;}
+    const first=groups.get(key),addition=e.body.split('\n').slice(2).join('\n');
+    first.confirmedFrom=first.confirmedFrom||first.created;
+    first.confirmedTo=e.created;
+    if(new TextEncoder().encode(first.body+addition).length<2200)first.body+=addition;
+    else first.more=(first.more||0)+1;
+    e.status='grouped';e.groupedInto=first.id;
+  }
+}

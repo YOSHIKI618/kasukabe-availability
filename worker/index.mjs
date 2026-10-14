@@ -1,4 +1,4 @@
-import {initialState, validateCondition, applyResult, enqueue, OFFICIAL} from './model.mjs';
+import {initialState, validateCondition, applyResult, enqueue, compactInitial, OFFICIAL} from './model.mjs';
 import catalog from '../public/catalog.json' with {type:'json'};
 const json=(v,status=200,headers={})=>new Response(JSON.stringify(v),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...headers}});
 const enc=new TextEncoder();
@@ -48,11 +48,13 @@ async function handle(req,env) {
   if(p.startsWith('/api/runner/')) {
     if(!await equal(req.headers.get('authorization'),`Bearer ${env.RUNNER_TOKEN}`))return json({error:'認証が必要です'},401);
     if(p==='/api/runner/start' && req.method==='POST') {
+      const b=await body(req);
       const owner=crypto.randomUUID();
       const r=await env.DB.prepare('INSERT INTO locks(id,owner,expires) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires=excluded.expires WHERE locks.expires<? RETURNING owner').bind('runner',owner,now+25*60000,now).first();
       if(!r)return json({error:'前の確認が実行中です'},409);
-      await mutate(env,s=>{s.lastRunner=now;s.runnerError=null;});
-      return json({owner,conditions:(await read(env)).state.conditions.filter(c=>c.enabled)});
+      await mutate(env,s=>{s.lastRunner=now;s.lastRunnerSource=b.source==='github'?'github':'manual';s.runnerError=null;});
+      const state=(await read(env)).state;
+      return json({owner,retrySiteAt:state.retrySiteAt||0,conditions:state.conditions.filter(c=>c.enabled)});
     }
     const owner=req.headers.get('x-run-owner');const lock=await env.DB.prepare('SELECT owner,expires FROM locks WHERE id=?').bind('runner').first();
     if(!lock||lock.owner!==owner||lock.expires<now)return json({error:'実行ロックの期限切れです'},409);
@@ -60,6 +62,7 @@ async function handle(req,env) {
     if(p==='/api/runner/coverage'&&req.method==='POST') {const b=await body(req);await mutate(env,s=>{const c=s.conditions.find(c=>c.id===b.id&&c.revision===b.revision);if(c){c.lastCycle=now;c.coverageEnd=b.end;c.scheduledDays=b.days;}});return json({ok:true});}
     if(p==='/api/runner/claim'&&req.method==='POST') {
       return json(await mutate(env,s=>{
+        compactInitial(s);
         for(const old of s.events) if(old.status==='sending'&&old.lease<now&&old.attempts>=5){old.status='failed';old.error='送信処理が中断され再試行上限に達しました';}
         const e=s.events.find(e=>(e.status==='pending'||(e.status==='sending'&&e.lease<now))&&e.retryAt<=now&&e.attempts<5);
         if(!e||!s.subscriptions.length)return null;
@@ -77,14 +80,14 @@ async function handle(req,env) {
       });return json({ok:true});
     }
     if(p==='/api/runner/end'&&req.method==='POST') {
-      const b=await body(req);await mutate(env,s=>{s.lastRunnerEnd=now;s.runnerError=b.error?'監視処理が途中で終了しました。GitHub Actionsを確認してください':null;});
+      const b=await body(req);await mutate(env,s=>{s.lastRunnerEnd=now;s.runnerError=b.error?'監視処理が途中で終了しました。GitHub Actionsを確認してください':null;if(Number.isFinite(b.retrySiteAt))s.retrySiteAt=b.retrySiteAt;});
       await env.DB.prepare('DELETE FROM locks WHERE id=? AND owner=?').bind('runner',owner).run();return json({ok:true});
     }
     return json({error:'見つかりません'},404);
   }
   if(!await authenticated(req,env))return json({error:'ログインしてください'},401);
   if(p==='/api/logout'&&req.method==='POST')return json({ok:true},200,{'Set-Cookie':'session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0'});
-  if(p==='/api/state'&&req.method==='GET')return json({...publicState((await read(env)).state),vapidPublicKey:env.VAPID_PUBLIC_KEY,githubUrl:env.GITHUB_REPO_URL||null});
+  if(p==='/api/state'&&req.method==='GET')return json({...publicState((await read(env)).state),schedulerReady:env.SCHEDULER_READY==='true',vapidPublicKey:env.VAPID_PUBLIC_KEY,githubUrl:env.GITHUB_REPO_URL||null});
   if(p==='/api/conditions'&&req.method==='POST') {
     const b=await body(req),c=validateCondition(b,catalog);
     return json(await mutate(env,s=>{

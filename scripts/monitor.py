@@ -12,6 +12,7 @@ import http.cookiejar
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from email.utils import parsedate_to_datetime
 
 from availability import TableReader, parse_detail
 from probe_site import Session, open_overview, BASE
@@ -129,8 +130,11 @@ def deliver(api):
                 break
             e = claim['event']
             confirmed = datetime.fromtimestamp(e['created']/1000, JST).strftime('%Y/%m/%d %H:%M')
+            if e.get('confirmedTo'):
+                confirmed += '～'+datetime.fromtimestamp(e['confirmedTo']/1000,JST).strftime('%H:%M')
+            more='\nほか'+str(e['more'])+'件はアプリで確認できます。' if e.get('more') else ''
             payload = json.dumps({'id':e['id'],'title':e['title'],
-                'body': e['body']+'\n確認・通知作成 '+confirmed+'（日本時間）\n公式予約：'+claim['official'],
+                'body': e['body']+more+'\n確認・通知作成 '+confirmed+'（日本時間）\n公式予約：'+claim['official'],
                 'url':api.base}, ensure_ascii=False)
             sent, expired = [], []
             for sub in claim['subscriptions']:
@@ -152,7 +156,7 @@ def main():
     BudgetSession.started = time.monotonic()
     api = API()
     try:
-        job = api.call('start')
+        job = api.call('start',{'source':'github' if os.environ.get('GITHUB_ACTIONS')=='true' else 'manual'})
     except urllib.error.HTTPError as e:
         if e.code == 409:
             print('A previous run is active; this run was skipped.')
@@ -160,9 +164,10 @@ def main():
         raise
     api.owner = job['owner']
     failed = False
+    retry_site_at=job.get('retrySiteAt',0)
     try:
         deliver(api)  # テストや前回の再試行を、長い巡回より先に配信。
-        if os.environ.get('NOTIFY_ONLY') != 'true':
+        if os.environ.get('NOTIFY_ONLY') != 'true' and time.time()*1000>=retry_site_at:
             for c in job['conditions']:
                 item = next(x for x in CATALOG if x['id'] == c['catalogId'])
                 days = target_days(c, item)
@@ -183,12 +188,21 @@ def main():
                                  '公開照会の取得・解析に失敗しました（'+kind+'）')
                         for day in group:
                             api.call('result', {'conditionId':c['id'],'revision':c['revision'],'date':day.isoformat(),'error':error})
+                        if isinstance(e,urllib.error.HTTPError) and e.code in (403,429):
+                            delay=3600
+                            value=e.headers.get('Retry-After','')
+                            if value.isdigit():delay=max(delay,int(value))
+                            elif value:
+                                try:delay=max(delay,int(parsedate_to_datetime(value).timestamp()-time.time()))
+                                except (ValueError,TypeError):pass
+                            retry_site_at=int((time.time()+delay)*1000)
+                            raise RuntimeError('site_access_restricted')
                         if isinstance(e,RuntimeError):
                             raise
                 deliver(api)
         deliver(api)
     finally:
-        api.call('end', {'error':failed})
+        api.call('end', {'error':failed or time.time()*1000<retry_site_at,'retrySiteAt':retry_site_at})
     print('Monitor completed. Site requests: '+str(BudgetSession.total)+'. Check the private app for results.')
 
 

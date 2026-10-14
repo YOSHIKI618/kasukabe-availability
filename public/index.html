@@ -3,7 +3,7 @@
 <body><header><div class="brand">KASUKABE <span>施設の空き通知</span></div><a href="https://www.pf489.com/kasukabe/web/" target="_blank" rel="noopener">公式予約サイト ↗</a></header>
 <main><section class="intro"><p class="eyebrow">週末のバドミントンを、もっと気軽に。</p><h1>空いた時間を、<br>見逃さない。</h1><p>希望の施設・曜日・時間を登録。<br>同じ区画で連続2時間以上の空きをお知らせします。</p></section>
 <p id="message" role="status" aria-live="polite"></p>
-<section id="login" class="card hidden"><h2>自分のアプリにログイン</h2><p>初期設定時にこのPCで指定した、アプリ用のパスワードを入力してください。</p><form id="loginForm"><label>アプリ用パスワード<input id="password" type="password" autocomplete="current-password" required></label><button>ログイン</button></form></section>
+<section id="login" class="card hidden"><h2>自分のアプリにログイン</h2><p>初期設定時に用意した、アプリ専用のパスワードを入力してください。</p><form id="loginForm"><label>アプリ用パスワード<input id="password" type="password" autocomplete="current-password" required></label><button>ログイン</button></form></section>
 <div id="app" class="hidden">
 <section class="card install"><h2>iPhoneで通知を受け取る</h2><p>Safariの共有ボタン →「ホーム画面に追加」。追加したアイコンから開き、下のボタンで通知を許可してください。画面を開き続ける必要はありません。</p><div class="actions"><button id="subscribe">この端末の通知を許可</button><button id="test" class="secondary">テスト通知を送る</button></div><p id="pushStatus" class="small"></p><p class="small">テストはクラウドに送信予約され、次の定期実行で配信されます。すぐ確認する場合は下のGitHubリンクで「Run workflow」を実行します。</p><div id="devices"></div></section>
 <section class="summary card"><div><p class="eyebrow">クラウドの確認状況</p><strong id="health">読み込み中</strong><p id="next" class="small"></p></div><a id="github" class="hidden" target="_blank" rel="noopener">GitHubで実行状況を見る ↗</a></section>

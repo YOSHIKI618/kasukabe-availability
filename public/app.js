@@ -11,15 +11,15 @@ function button(text,fn,cls='secondary'){const b=el('button',text,cls);b.type='b
 function link(text,url){const a=el('a',text);a.href=url;a.target='_blank';a.rel='noopener';return a;}
 async function load(){state=await api('state');$('login').classList.add('hidden');$('app').classList.remove('hidden');render();}
 function render(){
-  $('health').textContent=state.runnerError||(!state.lastRunner?'定期実行の初回確認待ち':Date.now()-state.lastRunner>100*60000?'定期確認が遅れています':'最終実行 '+dt(state.lastRunner));
-  $('next').textContent='次回は毎時17分ごろ（遅延あり）。PCの起動は不要です。';
+  $('health').textContent=!state.schedulerReady?'定期実行の設定が未完了です':state.runnerError||(!state.lastRunner?'定期実行の初回確認待ち':Date.now()-state.lastRunner>100*60000?'定期確認が遅れています':'最終実行 '+dt(state.lastRunner));
+  $('next').textContent=state.schedulerReady?'次回は毎時17分ごろ（遅延あり）。PCの起動は不要です。':'GitHubの追加認可待ちです。現在は開発担当による検証実行の結果を表示しています。';
   if(state.githubUrl){$('github').href=state.githubUrl+'/actions/workflows/monitor.yml';$('github').classList.remove('hidden');}
   const isIos=/iPad|iPhone|iPod/.test(navigator.userAgent);const standalone=matchMedia('(display-mode: standalone)').matches||navigator.standalone;
   $('pushStatus').textContent=`登録済み端末：${state.subscriptions.length}台 ／ この端末：${'Notification' in window?Notification.permission:'通知非対応'}${isIos&&!standalone?' ／ 先にホーム画面へ追加してください':''}`;
   $('devices').replaceChildren(...state.subscriptions.map((s,i)=>{const d=el('p',`端末 ${i+1}（登録 ${dt(s.created)}） `,'small');d.append(button('登録解除',async()=>{await api('unsubscribe',{id:s.id});await load();}));return d;}));
   $('conditions').replaceChildren();
   if(!state.conditions.length)$('conditions').append(el('p','まだ条件がありません。「条件を追加」から登録します。','empty'));
-  for(const c of state.conditions){const card=el('article',undefined,'record');card.append(el('h3',c.name),el('span',c.enabled?'監視中':'停止中','badge '+(c.enabled?'':'paused')),el('p',`${c.facility}・${c.room}`),el('p',c.areas.join(' ／ '),'small'),el('p',`${c.weekdays.map(d=>'月火水木金土日'[d]).join('・')}曜 ${tm(c.start)}～${tm(c.end)} ／ 連続${c.minimum/60}時間以上`),el('p',c.rolling?'明日以降の受付中日を自動更新':`${c.dateFrom} ～ ${c.dateTo}`,'small'),el('p',`最終確認 ${dt(c.lastCheck)} ／ 正常取得 ${dt(c.lastSuccess)} ／ 確認済み日数 ${c.scopeCount}`,'small'));
+  for(const c of state.conditions){const card=el('article',undefined,'record');card.append(el('h3',c.name),el('span',c.enabled?'監視中':'停止中','badge '+(c.enabled?'':'paused')),el('p',`${c.facility}・${c.room}`),el('p',c.areas.join(' ／ '),'small'),el('p',`${c.weekdays.map(d=>'月火水木金土日'[d]).join('・')}曜 ${tm(c.start)}～${tm(c.end)} ／ 連続${c.minimum/60}時間以上`),el('p',c.rolling?'明日以降の受付中日を自動更新':`${c.dateFrom} ～ ${c.dateTo}`,'small'),el('p',`最終確認 ${dt(c.lastCheck)} ／ 正常取得 ${dt(c.lastSuccess)} ／ 確認済み日数 ${c.scopeCount} / ${c.scheduledDays??'—'}`,'small'));
     if(c.error)card.append(el('p',`取得エラー（連続${c.failures}回）：${c.error}。前回の正常結果を保持しています。`,'error'));
     const actions=el('div',undefined,'actions');actions.append(button(c.enabled?'監視を停止':'監視を再開',async()=>{await api('condition-action',{id:c.id,action:'toggle'});await load();}),button('編集',()=>edit(c)),button('削除',async()=>{if(confirm('この監視条件を削除しますか？')){await api('condition-action',{id:c.id,action:'delete'});await load();}},'danger'));card.append(actions);$('conditions').append(card);
   }
@@ -27,7 +27,7 @@ function render(){
   const today=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
   for(const c of state.conditions)for(const w of c.windows.filter(w=>w.date>=today).sort((a,b)=>a.date.localeCompare(b.date)||a.start-b.start)){count++;const d=el('article',undefined,'record');d.append(el('h3',`${w.date} ${tm(w.start)}～${tm(w.end)}`),el('p',`${c.facility}・${c.room}・${w.area}`),el('p',`確認 ${dt(w.checked)} ／ ${c.enabled?'監視中':'停止時の記録'} ／ 同名の別区画がある場合は公式画面でご確認ください`,'small'),link('公式予約サイトを開く ↗','https://www.pf489.com/kasukabe/web/'));$('windows').append(d);}
   if(!count)$('windows').append(el('p','条件に合う空きはまだ記録されていません。取得状況も確認してください。','empty'));
-  $('events').replaceChildren();for(const e of [...state.events].reverse().slice(0,50)){const d=el('article',undefined,'record');d.append(el('h3',e.title),el('p',`${dt(e.created)} ／ ${{pending:'送信待ち',sending:'送信処理中',sent:'通知サービス受付済み',failed:'送信失敗'}[e.status]||e.status}`,'small'),el('pre',e.body),link('公式予約サイトを開く ↗','https://www.pf489.com/kasukabe/web/'));if(e.error)d.append(el('p',e.error,'error'));$('events').append(d);}if(!state.events.length)$('events').append(el('p','通知履歴はまだありません。','empty'));
+  $('events').replaceChildren();for(const e of [...state.events].reverse().slice(0,50)){const d=el('article',undefined,'record');d.append(el('h3',e.title),el('p',`${dt(e.created)} ／ ${{pending:'送信待ち',sending:'送信処理中',sent:'通知サービス受付済み',failed:'送信失敗',grouped:'初回のまとめ通知に集約'}[e.status]||e.status}`,'small'),el('pre',e.body),link('公式予約サイトを開く ↗','https://www.pf489.com/kasukabe/web/'));if(e.error)d.append(el('p',e.error,'error'));$('events').append(d);}if(!state.events.length)$('events').append(el('p','通知履歴はまだありません。','empty'));
 }
 for(const c of catalog){const option=el('option',`${c.facility} ／ ${c.room}`);option.value=c.id;$('catalogId').append(option);}
 for(let d=0;d<7;d++){const label=el('label',undefined,'check');const input=document.createElement('input');input.type='checkbox';input.value=d;input.name='weekday';input.checked=d>=5;label.append(input,document.createTextNode('月火水木金土日'[d]));$('weekdays').append(label);}
