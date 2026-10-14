@@ -37,6 +37,9 @@ export const cellKey = s => `${s.area_key}|${s.start}|${s.end}`;
 export function applyResult(state, input, now=Date.now()) {
   const c=state.conditions.find(c=>c.id===input.conditionId);
   if(!c || !c.enabled || c.revision!==input.revision) return {ignored:true};
+  const today=new Date(now+9*3600000).toISOString().slice(0,10);
+  // 巡回中に日本時間の日付が変わった場合も、対象は常に明日以降。
+  if(/^\d{4}-\d{2}-\d{2}$/.test(input.date||'') && input.date<=today) return {ignored:true};
   c.lastCheck=now;
   const fail=message=>{
     c.errors??={};c.errors[input.date||'general']=message;
@@ -78,9 +81,8 @@ export function applyResult(state, input, now=Date.now()) {
     enqueue(state,{kind:'availability',title:'春日部の施設に空き',body,conditionId:c.id},now);
   }
   c.samples[input.date]={shape,cells,windows,checked:now};
-  const today=new Date(now+9*3600000).toISOString().slice(0,10);
-  for(const d of Object.keys(c.samples)) if(d<today||(!c.rolling&&d>c.dateTo)) delete c.samples[d];
-  if(c.errors) {delete c.errors[input.date];for(const d of Object.keys(c.errors))if(d<today)delete c.errors[d];}
+  for(const d of Object.keys(c.samples)) if(d<=today||(!c.rolling&&d>c.dateTo)) delete c.samples[d];
+  if(c.errors) {delete c.errors[input.date];for(const d of Object.keys(c.errors))if(d<=today)delete c.errors[d];}
   c.lastSuccess=now;c.error=Object.values(c.errors||{})[0]||null;if(!c.error)c.failures=0;
   return {windows:windows.length, changed:changed.length};
 }

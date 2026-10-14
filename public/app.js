@@ -12,7 +12,7 @@ function link(text,url){const a=el('a',text);a.href=url;a.target='_blank';a.rel=
 async function load(){state=await api('state');$('login').classList.add('hidden');$('app').classList.remove('hidden');render();}
 function render(){
   $('health').textContent=!state.schedulerReady?'定期実行の設定が未完了です':state.runnerError||(!state.lastRunner?'定期実行の初回確認待ち':Date.now()-state.lastRunner>100*60000?'定期確認が遅れています':'最終実行 '+dt(state.lastRunner));
-  $('next').textContent=state.schedulerReady?'次回は毎時17分ごろ（遅延あり）。PCの起動は不要です。':'GitHubの追加認可待ちです。現在は開発担当による検証実行の結果を表示しています。';
+  $('next').textContent=state.schedulerReady?'次回は毎時17分ごろ（遅延あり）。PCの起動は不要です。':'クラウドの定期実行を設置・検証中です。画面には検証時の取得結果を表示しています。';
   if(state.githubUrl){$('github').href=state.githubUrl+'/actions/workflows/monitor.yml';$('github').classList.remove('hidden');}
   const isIos=/iPad|iPhone|iPod/.test(navigator.userAgent);const standalone=matchMedia('(display-mode: standalone)').matches||navigator.standalone;
   $('pushStatus').textContent=`登録済み端末：${state.subscriptions.length}台 ／ この端末：${'Notification' in window?Notification.permission:'通知非対応'}${isIos&&!standalone?' ／ 先にホーム画面へ追加してください':''}`;
@@ -25,7 +25,7 @@ function render(){
   }
   $('windows').replaceChildren();let count=0;
   const today=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
-  for(const c of state.conditions)for(const w of c.windows.filter(w=>w.date>=today).sort((a,b)=>a.date.localeCompare(b.date)||a.start-b.start)){count++;const d=el('article',undefined,'record');d.append(el('h3',`${w.date} ${tm(w.start)}～${tm(w.end)}`),el('p',`${c.facility}・${c.room}・${w.area}`),el('p',`確認 ${dt(w.checked)} ／ ${c.enabled?'監視中':'停止時の記録'} ／ 同名の別区画がある場合は公式画面でご確認ください`,'small'),link('公式予約サイトを開く ↗','https://www.pf489.com/kasukabe/web/'));$('windows').append(d);}
+  for(const c of state.conditions)for(const w of c.windows.filter(w=>w.date>today).sort((a,b)=>a.date.localeCompare(b.date)||a.start-b.start)){count++;const d=el('article',undefined,'record');d.append(el('h3',`${w.date} ${tm(w.start)}～${tm(w.end)}`),el('p',`${c.facility}・${c.room}・${w.area}`),el('p',`確認 ${dt(w.checked)} ／ ${c.enabled?'監視中':'停止時の記録'} ／ 同名の別区画がある場合は公式画面でご確認ください`,'small'),link('公式予約サイトを開く ↗','https://www.pf489.com/kasukabe/web/'));$('windows').append(d);}
   if(!count)$('windows').append(el('p','条件に合う空きはまだ記録されていません。取得状況も確認してください。','empty'));
   $('events').replaceChildren();for(const e of [...state.events].reverse().slice(0,50)){const d=el('article',undefined,'record');d.append(el('h3',e.title),el('p',`${dt(e.created)} ／ ${{pending:'送信待ち',sending:'送信処理中',sent:'通知サービス受付済み',failed:'送信失敗',grouped:'初回のまとめ通知に集約'}[e.status]||e.status}`,'small'),el('pre',e.body),link('公式予約サイトを開く ↗','https://www.pf489.com/kasukabe/web/'));if(e.error)d.append(el('p',e.error,'error'));$('events').append(d);}if(!state.events.length)$('events').append(el('p','通知履歴はまだありません。','empty'));
 }
