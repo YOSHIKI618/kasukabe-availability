@@ -50,7 +50,7 @@ async function handle(req,env) {
     if(p==='/api/runner/start' && req.method==='POST') {
       const b=await body(req);
       const owner=crypto.randomUUID();
-      const r=await env.DB.prepare('INSERT INTO locks(id,owner,expires) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires=excluded.expires WHERE locks.expires<? RETURNING owner').bind('runner',owner,now+25*60000,now).first();
+      const r=await env.DB.prepare('INSERT INTO locks(id,owner,expires) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires=excluded.expires WHERE locks.expires<? RETURNING owner').bind('runner',owner,now+35*60000,now).first();
       if(!r)return json({error:'前の確認が実行中です'},409);
       await mutate(env,s=>{s.lastRunner=now;s.lastRunnerSource=b.source==='github'?'github':'manual';s.runnerError=null;});
       const state=(await read(env)).state;

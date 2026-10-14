@@ -55,7 +55,7 @@ class BudgetSession(Session):
 
     @classmethod
     def count_request(cls):
-        if cls.total >= 500 or time.monotonic()-cls.started > 20*60:
+        if cls.total >= 500 or time.monotonic()-cls.started > 25*60:
             raise RuntimeError('access_budget')
         cls.total += 1
 
@@ -123,7 +123,7 @@ def deliver(api):
         keyfile = Path(tmp)/'push.pem'
         keyfile.write_text(pem, encoding='ascii')
         for _ in range(80):
-            if time.monotonic()-BudgetSession.started>22*60:
+            if time.monotonic()-BudgetSession.started>28*60:
                 break
             claim = api.call('claim')
             if not claim:

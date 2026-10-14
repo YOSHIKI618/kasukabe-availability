@@ -18,7 +18,7 @@ jobs:
     # 課金される大型runnerや、非公開リポジトリの従量実行へ切り替えない。
     if: github.event.repository.private == false
     runs-on: ubuntu-latest
-    timeout-minutes: 24
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
