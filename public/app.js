@@ -11,15 +11,22 @@ function button(text,fn,cls='secondary'){const b=el('button',text,cls);b.type='b
 function link(text,url){const a=el('a',text);a.href=url;a.target='_blank';a.rel='noopener';return a;}
 async function load(){state=await api('state');$('login').classList.add('hidden');$('app').classList.remove('hidden');render();}
 function render(){
-  $('health').textContent=!state.schedulerReady?'定期実行の設定が未完了です':state.runnerError||(!state.lastScheduledRunner?'時刻による自動起動の初回確認中です':Date.now()-state.lastScheduledRunner>100*60000?'定期確認が遅れています':'最終自動起動 '+dt(state.lastScheduledRunner));
-  $('next').textContent=state.schedulerReady?'次回は毎時57分ごろ（遅延あり）。PCの起動は不要です。':'クラウドの定期実行を設置・検証中です。画面には検証時の取得結果を表示しています。';
+  const monitor=state.monitor,automatic=monitor?state.lastCloudflareRunner:state.lastGithubScheduledRunner||state.lastScheduledRunner;
+  const pausedAll=monitor&&!monitor.enabled;
+  $('health').textContent=pausedAll?'定期確認を停止中です':!state.schedulerReady?'定期実行の設定が未完了です':monitor?.lastError||state.runnerError||(!automatic?'時刻による自動起動の初回確認中です':Date.now()-automatic>100*60000?'定期確認が遅れています':'最終自動起動 '+dt(automatic));
+  const progress=monitor?.running?(monitor.notifyOnly?'通知を配信中です。':monitor.conditionCount?`確認中：${Math.min(monitor.conditionIndex+1,monitor.conditionCount)} / ${monitor.conditionCount}条件。`:'保存した条件を確認しています。'):'';
+  $('next').textContent=monitor?(pausedAll?'「定期確認を再開」で保存した条件の確認を始めます。':progress+`次回の目安 ${dt(monitor.nextMonitorAt)}。約1時間ごとに確認し、PCの起動は不要です。`):state.schedulerReady?'次回は毎時57分ごろ（遅延あり）。PCの起動は不要です。':'クラウドの定期実行を設置・検証中です。画面には検証時の取得結果を表示しています。';
+  $('monitorControls').classList.toggle('hidden',!monitor);$('pauseAll').classList.toggle('hidden',!monitor?.enabled);$('resumeAll').classList.toggle('hidden',Boolean(monitor?.enabled));
   if(state.githubUrl){$('github').href=state.githubUrl+'/actions/workflows/monitor.yml';$('github').classList.remove('hidden');}
+  if(monitor)$('github').classList.add('hidden');
+  $('testHelp').textContent=monitor?'テスト通知はクラウドから送信します。送信結果は「通知履歴」に表示されます。':'テストはクラウドに予約されます。GitHubの「Run workflow」で配信できます。';
+  $('schedulerHelp').textContent=monitor?'クラウドの確認状況を確認し、全体が停止中なら「定期確認を再開」を押します。':'GitHubでMonitorが有効か確認してください。';
   const isIos=/iPad|iPhone|iPod/.test(navigator.userAgent);const standalone=matchMedia('(display-mode: standalone)').matches||navigator.standalone;
   $('pushStatus').textContent=`登録済み端末：${state.subscriptions.length}台 ／ この端末：${'Notification' in window?Notification.permission:'通知非対応'}${isIos&&!standalone?' ／ 先にホーム画面へ追加してください':''}`;
   $('devices').replaceChildren(...state.subscriptions.map((s,i)=>{const d=el('p',`端末 ${i+1}（登録 ${dt(s.created)}） `,'small');d.append(button('登録解除',async()=>{await api('unsubscribe',{id:s.id});await load();}));return d;}));
   $('conditions').replaceChildren();
   if(!state.conditions.length)$('conditions').append(el('p','まだ条件がありません。「条件を追加」から登録します。','empty'));
-  for(const c of state.conditions){const card=el('article',undefined,'record');card.append(el('h3',c.name),el('span',c.enabled?'監視中':'停止中','badge '+(c.enabled?'':'paused')),el('p',`${c.facility}・${c.room}`),el('p',c.areas.join(' ／ '),'small'),el('p',`${c.weekdays.map(d=>'月火水木金土日'[d]).join('・')}曜 ${tm(c.start)}～${tm(c.end)} ／ 連続${c.minimum/60}時間以上`),el('p',c.rolling?'明日以降の受付中日を自動更新':`${c.dateFrom} ～ ${c.dateTo}`,'small'),el('p',`最終確認 ${dt(c.lastCheck)} ／ 正常取得 ${dt(c.lastSuccess)} ／ 確認済み日数 ${c.scopeCount} / ${c.scheduledDays??'—'}`,'small'));
+  for(const c of state.conditions){const card=el('article',undefined,'record');card.append(el('h3',c.name),el('span',c.enabled?(pausedAll?'対象（全体停止中）':'監視中'):'停止中','badge '+(c.enabled&&!pausedAll?'':'paused')),el('p',`${c.facility}・${c.room}`),el('p',c.areas.join(' ／ '),'small'),el('p',`${c.weekdays.map(d=>'月火水木金土日'[d]).join('・')}曜 ${tm(c.start)}～${tm(c.end)} ／ 連続${c.minimum/60}時間以上`),el('p',c.rolling?'明日以降の受付中日を自動更新':`${c.dateFrom} ～ ${c.dateTo}`,'small'),el('p',`最終確認 ${dt(c.lastCheck)} ／ 正常取得 ${dt(c.lastSuccess)} ／ 確認済み日数 ${c.scopeCount} / ${c.scheduledDays??'—'}`,'small'));
     if(c.error)card.append(el('p',`取得エラー（連続${c.failures}回）：${c.error}。前回の正常結果を保持しています。`,'error'));
     const actions=el('div',undefined,'actions');actions.append(button(c.enabled?'監視を停止':'監視を再開',async()=>{await api('condition-action',{id:c.id,action:'toggle'});await load();}),button('編集',()=>edit(c)),button('削除',async()=>{if(confirm('この監視条件を削除しますか？')){await api('condition-action',{id:c.id,action:'delete'});await load();}},'danger'));card.append(actions);$('conditions').append(card);
   }
@@ -38,7 +45,9 @@ function period(){$('dateFrom').disabled=$('rolling').checked;$('dateTo').disabl
 $('conditionForm').onsubmit=e=>{e.preventDefault();run(async()=>{const mins=id=>{const [h,m]=$(id).value.split(':').map(Number);return h*60+m;};await api('conditions',{id:$('conditionId').value||undefined,name:$('name').value,catalogId:$('catalogId').value,areas:[...document.querySelectorAll('[name=area]:checked')].map(x=>x.value),weekdays:[...document.querySelectorAll('[name=weekday]:checked')].map(x=>Number(x.value)),start:mins('start'),end:mins('end'),minimum:Number($('minimum').value),dateFrom:$('dateFrom').value,dateTo:$('dateTo').value,rolling:$('rolling').checked,enabled:$('enabled').checked});$('editor').classList.add('hidden');message('クラウドに保存しました。開始した条件は次の定期確認から使われます。');await load();});};
 $('loginForm').onsubmit=e=>{e.preventDefault();run(async()=>{await api('login',{password:$('password').value});$('password').value='';message('ログインしました');await load();});};
 $('logout').onclick=()=>run(async()=>{await api('logout',{});location.reload();});
-$('test').onclick=()=>run(async()=>{await api('test',{});message('テスト通知を予約しました。次の定期実行を待つか、GitHubの「Run workflow」で今すぐ配信できます。');await load();});
+$('test').onclick=()=>run(async()=>{await api('test',{});message(state.monitor?'テスト通知をクラウドに予約しました。通知履歴の送信結果をご確認ください。':'テスト通知を予約しました。次の定期実行を待つか、GitHubの「Run workflow」で今すぐ配信できます。');await load();});
+$('pauseAll').onclick=()=>run(async()=>{await api('monitor-control',{action:'stop'});message('定期確認を一時停止しました。実行中の確認は次の区切りで停止します。');await load();});
+$('resumeAll').onclick=()=>run(async()=>{await api('monitor-control',{action:'start'});message('定期確認を再開しました。');await load();});
 $('subscribe').onclick=()=>run(async()=>{if(!('serviceWorker' in navigator)||!('PushManager' in window))throw Error('Safariでホーム画面に追加し、そのアイコンから開いてください');if(!state.vapidPublicKey)throw Error('通知の公開鍵がまだ設定されていません');const permission=await Notification.requestPermission();if(permission!=='granted')throw Error('通知を許可できませんでした。iPhoneの設定を確認してください');const registration=await navigator.serviceWorker.register('/sw.js');await navigator.serviceWorker.ready;const v=state.vapidPublicKey;const raw=atob(v.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-v.length%4)%4));const key=Uint8Array.from(raw,c=>c.charCodeAt(0));let sub=await registration.pushManager.getSubscription();if(!sub)sub=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});await api('subscription',sub.toJSON());message('この端末の通知を登録しました。テスト通知で受信を確認してください。');await load();});
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 await run(load);setInterval(()=>{if(!document.hidden && state)run(load);},60000);

@@ -107,3 +107,9 @@ export function compactInitial(state) {
     e.status='grouped';e.groupedInto=first.id;
   }
 }
+export function pendingEvent(state,now,excludeInitialFor=[]) {
+  const exclude=new Set(excludeInitialFor);
+  const ready=e=>(e.status==='pending'||(e.status==='sending'&&e.lease<now))&&e.retryAt<=now&&e.attempts<5&&
+    !(exclude.has(e.conditionId)&&e.kind==='availability'&&e.body.includes('初回確認で空きが見つかりました'));
+  return state.events.find(e=>e.kind==='test'&&ready(e))||state.events.find(ready);
+}

@@ -4,5 +4,9 @@
   "compatibility_date": "2026-10-13",
   "assets": {"directory": "./public", "binding": "ASSETS", "run_worker_first": ["/api/*"]},
   "d1_databases": [{"binding": "DB", "database_name": "kasukabe-availability", "database_id": "REPLACE_WITH_DATABASE_ID"}],
+  "services": [{"binding": "APP_API", "service": "kasukabe-availability"}],
+  "durable_objects": {"bindings": [{"name": "MONITOR", "class_name": "AvailabilityMonitor"}]},
+  "migrations": [{"tag": "monitor-v1", "new_sqlite_classes": ["AvailabilityMonitor"]}],
+  "vars": {"SELF_URL": "https://kasukabe-availability.yoshiki-sports-notify.workers.dev"},
   "observability": {"enabled": false}
 }

@@ -1,5 +1,6 @@
-import {initialState, validateCondition, applyResult, enqueue, compactInitial, OFFICIAL} from './model.mjs';
+import {initialState, validateCondition, applyResult, enqueue, compactInitial, pendingEvent, OFFICIAL} from './model.mjs';
 import catalog from '../public/catalog.json' with {type:'json'};
+export {AvailabilityMonitor} from './monitor-do.mjs';
 const json=(v,status=200,headers={})=>new Response(JSON.stringify(v),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...headers}});
 const enc=new TextEncoder();
 async function digest(s) {return [...new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(s)))].map(x=>x.toString(16).padStart(2,'0')).join('');}
@@ -52,10 +53,13 @@ async function handle(req,env) {
       const owner=crypto.randomUUID();
       const r=await env.DB.prepare('INSERT INTO locks(id,owner,expires) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires=excluded.expires WHERE locks.expires<? RETURNING owner').bind('runner',owner,now+35*60000,now).first();
       if(!r)return json({error:'前の確認が実行中です'},409);
-      await mutate(env,s=>{s.lastRunner=now;s.lastRunnerSource=b.source==='github'?'github':'manual';
-        s.lastRunnerEvent=['schedule','workflow_dispatch'].includes(b.event)?b.event:'manual';
+      await mutate(env,s=>{s.lastRunner=now;s.lastRunnerSource=['github','cloudflare'].includes(b.source)?b.source:'manual';
+        s.lastRunnerEvent=['schedule','workflow_dispatch','alarm'].includes(b.event)?b.event:'manual';
         s.lastRunnerNotifyOnly=b.notifyOnly===true;
-        if(b.source==='github'&&b.event==='schedule'&&b.notifyOnly!==true)s.lastScheduledRunner=now;
+        if(b.notifyOnly!==true&&((b.source==='github'&&b.event==='schedule')||(b.source==='cloudflare'&&b.event==='alarm'))) {
+          s.lastScheduledRunner=now;s.lastScheduledRunnerSource=b.source;
+          if(b.source==='cloudflare')s.lastCloudflareRunner=now;else s.lastGithubScheduledRunner=now;
+        }
         s.runnerError=null;});
       const state=(await read(env)).state;
       return json({owner,retrySiteAt:state.retrySiteAt||0,conditions:state.conditions.filter(c=>c.enabled)});
@@ -65,10 +69,11 @@ async function handle(req,env) {
     if(p==='/api/runner/result'&&req.method==='POST') {const b=await body(req);return json(await mutate(env,s=>applyResult(s,b,now)));}
     if(p==='/api/runner/coverage'&&req.method==='POST') {const b=await body(req);await mutate(env,s=>{const c=s.conditions.find(c=>c.id===b.id&&c.revision===b.revision);if(c){c.lastCycle=now;c.coverageEnd=b.end;c.scheduledDays=b.days;}});return json({ok:true});}
     if(p==='/api/runner/claim'&&req.method==='POST') {
+      const b=await body(req);
       return json(await mutate(env,s=>{
         compactInitial(s);
         for(const old of s.events) if(old.status==='sending'&&old.lease<now&&old.attempts>=5){old.status='failed';old.error='送信処理が中断され再試行上限に達しました';}
-        const e=s.events.find(e=>(e.status==='pending'||(e.status==='sending'&&e.lease<now))&&e.retryAt<=now&&e.attempts<5);
+        const e=pendingEvent(s,now,Array.isArray(b.excludeInitialFor)?b.excludeInitialFor:[]);
         if(!e||!s.subscriptions.length)return null;
         e.status='sending';e.attempts++;e.lease=now+120000;
         return {event:e,subscriptions:s.subscriptions.filter(x=>!e.deliveries[x.id]),official:OFFICIAL};
@@ -84,14 +89,36 @@ async function handle(req,env) {
       });return json({ok:true});
     }
     if(p==='/api/runner/end'&&req.method==='POST') {
-      const b=await body(req);await mutate(env,s=>{s.lastRunnerEnd=now;s.runnerError=b.error?'監視処理が途中で終了しました。GitHub Actionsを確認してください':null;if(Number.isFinite(b.retrySiteAt))s.retrySiteAt=b.retrySiteAt;});
+      const b=await body(req);await mutate(env,s=>{s.lastRunnerEnd=now;s.runnerError=b.error?'監視処理にエラーがありました。条件ごとの取得エラーを確認してください':null;if(Number.isFinite(b.retrySiteAt))s.retrySiteAt=b.retrySiteAt;});
       await env.DB.prepare('DELETE FROM locks WHERE id=? AND owner=?').bind('runner',owner).run();return json({ok:true});
     }
     return json({error:'見つかりません'},404);
   }
   if(!await authenticated(req,env))return json({error:'ログインしてください'},401);
   if(p==='/api/logout'&&req.method==='POST')return json({ok:true},200,{'Set-Cookie':'session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0'});
-  if(p==='/api/state'&&req.method==='GET')return json({...publicState((await read(env)).state),schedulerReady:env.SCHEDULER_READY==='true',vapidPublicKey:env.VAPID_PUBLIC_KEY,githubUrl:env.GITHUB_REPO_URL||null});
+  if(p==='/api/state'&&req.method==='GET') {
+    const state=(await read(env)).state;
+    const monitor=env.MONITOR?await(await env.MONITOR.get(env.MONITOR.idFromName('personal')).fetch('https://monitor/status')).json():null;
+    return json({...publicState(state),monitor,schedulerReady:env.SCHEDULER_READY==='true',vapidPublicKey:env.VAPID_PUBLIC_KEY,githubUrl:env.GITHUB_REPO_URL||null});
+  }
+  if(p==='/api/monitor-control'&&req.method==='POST') {
+    if(!env.MONITOR)return json({error:'クラウドの時計がまだ設置されていません'},503);
+    const b=await body(req);if(!['start','stop'].includes(b.action))throw Error('操作が正しくありません');
+    const r=await env.MONITOR.get(env.MONITOR.idFromName('personal')).fetch('https://monitor/'+(b.action==='start'?'schedule':'stop'),{method:'POST'});
+    return json(await r.json(),r.status);
+  }
+  if(p==='/api/site-probe'&&req.method==='POST') {
+    let target=OFFICIAL+'StartPage.aspx?StartPage=ModeSelect';const cookies=new Map(),statuses=[];
+    for(let i=0;i<5;i++) {
+      const r=await fetch(target,{headers:{'User-Agent':'KasukabeAvailabilityMonitor/1.0 (personal read-only check)','Cookie':[...cookies].map(([k,v])=>k+'='+v).join('; ')},redirect:'manual',signal:AbortSignal.timeout(20000)});
+      statuses.push(r.status);
+      for(const raw of r.headers.getSetCookie?.()||r.headers.getAll?.('Set-Cookie')||[]) {const pair=raw.split(';')[0],at=pair.indexOf('=');if(at>0)cookies.set(pair.slice(0,at),pair.slice(at+1));}
+      if([301,302,303,307,308].includes(r.status)) {const next=new URL(r.headers.get('Location'),target).href;if(!next.startsWith(OFFICIAL))return json({statuses,externalRedirect:true});target=next;continue;}
+      const html=r.status===200?await r.text():'';
+      return json({statuses,recognized:html.includes('dlSSCategory'),bytes:new TextEncoder().encode(html).length});
+    }
+    return json({statuses,redirectLimit:true});
+  }
   if(p==='/api/conditions'&&req.method==='POST') {
     const b=await body(req),c=validateCondition(b,catalog);
     return json(await mutate(env,s=>{
@@ -125,7 +152,9 @@ async function handle(req,env) {
     await mutate(env,s=>{if(!s.subscriptions.length)throw Error('先にこのiPhoneの通知を許可してください');
       if(s.events.some(e=>e.kind==='test'&&now-e.created<60000))throw Error('テスト通知は1分待ってから再試行してください');
       enqueue(s,{kind:'test',title:'通知のテストです',body:'春日部の空き通知アプリから届きました。設定はクラウドに保存されています。'},now);
-    });return json({ok:true});
+    });
+    if(env.MONITOR)await(await env.MONITOR.get(env.MONITOR.idFromName('personal')).fetch('https://monitor/wake',{method:'POST'})).json();
+    return json({ok:true});
   }
   return json({error:'見つかりません'},404);
 }

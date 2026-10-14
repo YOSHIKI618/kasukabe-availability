@@ -1,8 +1,7 @@
-name: Monitor
+name: Manual fallback monitor
 on:
-  schedule:
-    # Hourly in UTC; Japan uses the same minute of each hour.
-    - cron: '57 * * * *'
+  # Regular monitoring uses a persisted Cloudflare Durable Object alarm.
+  # Keep this workflow as a manual recovery tool only.
   workflow_dispatch:
     inputs:
       notify_only:
