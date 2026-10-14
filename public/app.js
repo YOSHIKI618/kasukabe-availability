@@ -12,7 +12,7 @@ function link(text,url){const a=el('a',text);a.href=url;a.target='_blank';a.rel=
 async function load(){state=await api('state');$('login').classList.add('hidden');$('app').classList.remove('hidden');render();}
 function render(){
   $('health').textContent=!state.schedulerReady?'定期実行の設定が未完了です':state.runnerError||(!state.lastScheduledRunner?'時刻による自動起動の初回確認中です':Date.now()-state.lastScheduledRunner>100*60000?'定期確認が遅れています':'最終自動起動 '+dt(state.lastScheduledRunner));
-  $('next').textContent=state.schedulerReady?'次回は毎時47分ごろ（遅延あり）。PCの起動は不要です。':'クラウドの定期実行を設置・検証中です。画面には検証時の取得結果を表示しています。';
+  $('next').textContent=state.schedulerReady?'次回は毎時57分ごろ（遅延あり）。PCの起動は不要です。':'クラウドの定期実行を設置・検証中です。画面には検証時の取得結果を表示しています。';
   if(state.githubUrl){$('github').href=state.githubUrl+'/actions/workflows/monitor.yml';$('github').classList.remove('hidden');}
   const isIos=/iPad|iPhone|iPod/.test(navigator.userAgent);const standalone=matchMedia('(display-mode: standalone)').matches||navigator.standalone;
   $('pushStatus').textContent=`登録済み端末：${state.subscriptions.length}台 ／ この端末：${'Notification' in window?Notification.permission:'通知非対応'}${isIos&&!standalone?' ／ 先にホーム画面へ追加してください':''}`;

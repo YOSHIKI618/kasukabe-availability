@@ -1,7 +1,8 @@
 name: Monitor
 on:
   schedule:
-    - cron: '47 * * * *'
+    # Hourly in UTC; Japan uses the same minute of each hour.
+    - cron: '57 * * * *'
   workflow_dispatch:
     inputs:
       notify_only:
