@@ -95,7 +95,7 @@ export function batches(days) {
 export function calendarDays(form,room) {
   if(form.tables.length!==1)throw Error('施設一覧の表が変わりました');
   const rows=form.tables[0].rows,header=rows[0];
-  const match=header?.[0]?.normalize('NFKC').match(/^(\d{4})年(\d{1,2})月$/);
+  const match=header?.[0]?.normalize('NFKC').match(/^(\d{4})年(\d{1,2})月(?:\s+全日)?$/);
   const found=rows.slice(1).flatMap((r,i)=>r[0]===room?[{row:r,index:i+2}]:[]);
   if(!match||found.length!==1||found[0].row.length!==header.length)throw Error('施設一覧の日付・部屋が一致しません');
   let year=Number(match[1]),month=Number(match[2]),previous=0;const result=new Map();

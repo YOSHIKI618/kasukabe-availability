@@ -75,7 +75,7 @@ class CountRedirects(urllib.request.HTTPRedirectHandler):
 
 def calendar_days(table, room):
     rows=table['rows']; header=rows[0]
-    match=re.fullmatch(r'(\d{4})年(\d{1,2})月',header[0])
+    match=re.fullmatch(r'(\d{4})年(\d{1,2})月(?:\s+全日)?',header[0])
     found=[(i+2,row) for i,row in enumerate(rows[1:]) if row[0]==room]
     if not match or len(found)!=1 or len(found[0][1])!=len(header):
         raise ValueError('overview_dates_or_room')

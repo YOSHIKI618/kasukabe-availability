@@ -21,7 +21,7 @@ export class AvailabilityMonitor {
   async changeMeta(fn) {return this.ctx.storage.transaction(async tx=>{const m=await tx.get('meta')||fresh();fn(m);await tx.put('meta',m);return m;});}
   async status() {
     const m=await this.meta(),job=await this.ctx.storage.get('job');
-    return {...m,implementation:'2026-10-15.1',running:Boolean(job),notifyOnly:job?.notifyOnly||false,conditionIndex:job?.conditionIndex||0,conditionCount:job?.plans.length||0,
+    return {...m,implementation:'2026-10-15.2',running:Boolean(job),notifyOnly:job?.notifyOnly||false,conditionIndex:job?.conditionIndex||0,conditionCount:job?.plans.length||0,
       siteRequests:await this.ctx.storage.get('siteCount')||0,alarmAt:await this.ctx.storage.getAlarm()};
   }
   async fetch(req) {
@@ -104,7 +104,7 @@ export class AvailabilityMonitor {
     const m=await this.changeMeta(m=>{
       m.handledNotificationSerial=Math.max(m.handledNotificationSerial,job.notificationSerialSeen);
       m.lastCompletedAt=this.now();m.waitingForRun=false;
-      if(!job.notifyOnly){m.lastSiteRequests=job.siteRequests;m.lastError=error?safeError(error):job.failed?'一部の対象日を取得できませんでした。条件ごとの取得エラーを確認してください':null;}
+      if(!job.notifyOnly){m.lastSiteRequests=job.siteRequests;m.lastError=error?safeError(error):job.failed?'一部の対象日を取得できませんでした。条件ごとの取得エラーを確認してください':null;if(!m.lastError)delete m.lastCollectionIssue;}
       if(m.enabled)m.nextMonitorAt=Math.max(m.nextMonitorAt||this.now()+HOUR,job.retrySiteAt||0,this.now()+3000);
     });
     await this.scheduleIdle(m);
