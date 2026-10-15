@@ -11,15 +11,17 @@ const safeError=e=>e instanceof SiteError?'公開照会の通信に失敗しま�
   run_budget:'今回の確認が時間上限に達しました',api:'確認結果の保存先との通信に失敗しました',
   snapshot:'照会画面の状態が保存上限に達しました',stopped:'定期確認を停止しました'
 }[e.code]||'クラウドの確認処理でエラーが発生しました':'公開照会の取得・解析に失敗しました。前回の正常結果を保持しています';
+// 公開照会の実行環境の互換性診断。URLや長い状態値を保存・表示しない。
+const diagnostic=e=>({name:String(e.name).slice(0,40),message:String(e.message).replace(/https?:\/\/\S+|[A-Za-z0-9_+/=-]{40,}/g,'[省略]').slice(0,180)});
 
 // 1人用に名前を固定し、本番のObjectは1個だけ作る。SQLite型の無料枠を利用。
 export class AvailabilityMonitor {
-  constructor(ctx,env,options={}) {this.ctx=ctx;this.env=env;this.transport=options.fetch||fetch;this.now=options.now||Date.now;this.calls=0;this.job=null;}
+  constructor(ctx,env,options={}) {this.ctx=ctx;this.env=env;this.transport=options.fetch||((...args)=>fetch(...args));this.now=options.now||Date.now;this.calls=0;this.job=null;}
   async meta() {return await this.ctx.storage.get('meta')||fresh();}
   async changeMeta(fn) {return this.ctx.storage.transaction(async tx=>{const m=await tx.get('meta')||fresh();fn(m);await tx.put('meta',m);return m;});}
   async status() {
     const m=await this.meta(),job=await this.ctx.storage.get('job');
-    return {...m,running:Boolean(job),notifyOnly:job?.notifyOnly||false,conditionIndex:job?.conditionIndex||0,conditionCount:job?.plans.length||0,
+    return {...m,implementation:'2026-10-15.1',running:Boolean(job),notifyOnly:job?.notifyOnly||false,conditionIndex:job?.conditionIndex||0,conditionCount:job?.plans.length||0,
       siteRequests:await this.ctx.storage.get('siteCount')||0,alarmAt:await this.ctx.storage.getAlarm()};
   }
   async fetch(req) {
@@ -70,9 +72,10 @@ export class AvailabilityMonitor {
         try {
           const request=await makePushRequest(sub.subscription,payload,{privateKey:this.env.VAPID_PRIVATE_KEY,publicKey:this.env.VAPID_PUBLIC_KEY,subject:this.env.SELF_URL,now:this.now()});
           const r=await this.outbound('push',request.url,{method:'POST',headers:request.headers,body:request.body,redirect:'manual',signal:AbortSignal.timeout(15000)});
+          await this.changeMeta(m=>{m.lastPushStatus=r.status;});
           if(r.ok)sent.push(sub.id);else if([404,410].includes(r.status))expired.push(sub.id);
           await r.body?.cancel();
-        } catch { /* 失敗はackで永続的な再試行待ちにする。秘密を例外出力しない。 */ }
+        } catch(e) {await this.changeMeta(m=>{m.lastPushIssue={name:String(e.name).slice(0,40)};}); /* 秘密を例外出力しない。 */ }
       }
       await this.api('ack',{id:e.id,sent,expired});
     }
@@ -119,12 +122,13 @@ export class AvailabilityMonitor {
     if(!pending) {
       const session=new SiteSession((url,init)=>this.outbound('site',url,init),await this.ctx.storage.get('session'));
       try {
-        pending={results:await collect(session,plan.item,days),index:0,days};
+        pending={results:await collect(session,plan.item,days,c.areas),index:0,days};
         const snapshot=session.snapshot();
         if(new TextEncoder().encode(JSON.stringify(snapshot)).length>1900000)throw new MonitorError('snapshot');
         await this.ctx.storage.put('session',snapshot);await this.ctx.storage.put('pending',pending);
       } catch(e) {
         if(e instanceof MonitorError&&e.code==='stopped')throw e;
+        await this.changeMeta(m=>{m.lastCollectionIssue=diagnostic(e);});
         job.failed=true;await this.ctx.storage.delete('session');
         for(const date of days)await this.api('result',{conditionId:c.id,revision:c.revision,date,error:safeError(e)});
         if(e instanceof SiteError&&[403,429].includes(e.status)) {
@@ -135,7 +139,8 @@ export class AvailabilityMonitor {
       }
     }
     if(pending)for(;pending.index<days.length;) {
-      const date=days[pending.index],result=await this.api('result',{conditionId:c.id,revision:c.revision,date,slots:pending.results[date]});
+      const date=days[pending.index],data=pending.results[date];
+      const result=await this.api('result',{conditionId:c.id,revision:c.revision,date,...(data?.closed===true?{closed:true}:{slots:data})});
       if(result.error)job.failed=true;
       pending.index++;await this.ctx.storage.put('pending',pending);
     }

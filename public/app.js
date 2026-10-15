@@ -27,6 +27,7 @@ function render(){
   $('conditions').replaceChildren();
   if(!state.conditions.length)$('conditions').append(el('p','まだ条件がありません。「条件を追加」から登録します。','empty'));
   for(const c of state.conditions){const card=el('article',undefined,'record');card.append(el('h3',c.name),el('span',c.enabled?(pausedAll?'対象（全体停止中）':'監視中'):'停止中','badge '+(c.enabled&&!pausedAll?'':'paused')),el('p',`${c.facility}・${c.room}`),el('p',c.areas.join(' ／ '),'small'),el('p',`${c.weekdays.map(d=>'月火水木金土日'[d]).join('・')}曜 ${tm(c.start)}～${tm(c.end)} ／ 連続${c.minimum/60}時間以上`),el('p',c.rolling?'明日以降の受付中日を自動更新':`${c.dateFrom} ～ ${c.dateTo}`,'small'),el('p',`最終確認 ${dt(c.lastCheck)} ／ 正常取得 ${dt(c.lastSuccess)} ／ 確認済み日数 ${c.scopeCount} / ${c.scheduledDays??'—'}`,'small'));
+    if(c.closedDates?.length)card.append(el('p',`休館で通知対象外：${c.closedDates.filter(d=>d>new Date(Date.now()+9*3600000).toISOString().slice(0,10)).join('、')}`,'small'));
     if(c.error)card.append(el('p',`取得エラー（連続${c.failures}回）：${c.error}。前回の正常結果を保持しています。`,'error'));
     const actions=el('div',undefined,'actions');actions.append(button(c.enabled?'監視を停止':'監視を再開',async()=>{await api('condition-action',{id:c.id,action:'toggle'});await load();}),button('編集',()=>edit(c)),button('削除',async()=>{if(confirm('この監視条件を削除しますか？')){await api('condition-action',{id:c.id,action:'delete'});await load();}},'danger'));card.append(actions);$('conditions').append(card);
   }

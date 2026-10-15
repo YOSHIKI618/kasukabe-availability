@@ -40,7 +40,7 @@ function minutes(value) {
   if(h>24||m>59||(h===24&&m))throw Error('時刻が不正です');
   return h*60+m;
 }
-export function parseDetail(htmlOrForm,expectedDate=null) {
+export function parseDetail(htmlOrForm,expectedDate=null,allowedAreas=null) {
   const {tables}=typeof htmlOrForm==='string'?parsePage(htmlOrForm):htmlOrForm;
   if(!tables.length)throw Error('時間帯別の表がありません');
   const out=[];
@@ -61,6 +61,7 @@ export function parseDetail(htmlOrForm,expectedDate=null) {
     for(const r of rows.slice(1)) {
       if(r.length!==header.length)throw Error('時間帯と状態の個数が一致しません');
       const area=r[0],index=(occurrences.get(area)||0)+1;occurrences.set(area,index);
+      if(allowedAreas&&!allowedAreas.includes(area))continue;
       for(let i=0;i<times.length;i++) {
         const symbol=r[i+2].normalize('NFKC').trim();
         const state={'○':'available','◯':'available','×':'booked','-':'outside_application','−':'outside_application','―':'outside_application','ー':'outside_application','△':'conditional','*':'unknown'}[symbol];
@@ -90,6 +91,23 @@ export function batches(days) {
   const out=[];let rest=[...days];
   while(rest.length) {const first=Date.parse(rest[0]);const group=rest.filter(d=>Date.parse(d)-first<14*86400000);out.push(group);rest=rest.slice(group.length);}
   return out;
+}
+export function calendarDays(form,room) {
+  if(form.tables.length!==1)throw Error('施設一覧の表が変わりました');
+  const rows=form.tables[0].rows,header=rows[0];
+  const match=header?.[0]?.normalize('NFKC').match(/^(\d{4})年(\d{1,2})月$/);
+  const found=rows.slice(1).flatMap((r,i)=>r[0]===room?[{row:r,index:i+2}]:[]);
+  if(!match||found.length!==1||found[0].row.length!==header.length)throw Error('施設一覧の日付・部屋が一致しません');
+  let year=Number(match[1]),month=Number(match[2]),previous=0;const result=new Map();
+  for(let i=2;i<header.length;i++) {
+    const day=header[i].normalize('NFKC').match(/^(\d{1,2})\s*([日月火水木金土])$/);
+    if(!day)throw Error('施設一覧の日付形式が変わりました');
+    const number=Number(day[1]);if(number<previous){month++;if(month>12){month=1;year++;}}previous=number;
+    const date=new Date(Date.UTC(year,month-1,number));
+    if(date.getUTCMonth()!==month-1||'日月火水木金土'[date.getUTCDay()]!==day[2])throw Error('施設一覧の日付と曜日が一致しません');
+    result.set(date.toISOString().slice(0,10),{closed:found[0].row[i]==='休館',row:found[0].index});
+  }
+  return result;
 }
 
 export class SiteSession {
@@ -161,20 +179,25 @@ export async function openOverview(s,item,day) {
   const [y,m,d]=day.split('-');
   await s.click('ucPCFooter_btnForward',{txtYear:y,txtMonth:String(Number(m)),txtDay:String(Number(d))});
 }
-export async function collect(s,item,days) {
+export async function collect(s,item,days,allowedAreas=item.areas) {
   if(s.requests) {
-    await s.click('ucPCFooter_btnBack');
+    if(s.url.includes('Wg_JikantaibetsuAkiJoukyou.aspx'))await s.click('ucPCFooter_btnBack');
+    if(!s.url.includes('Wg_ShisetsubetsuAkiJoukyou.aspx'))throw Error('施設一覧に戻れません');
     const field=s.form.controls.find(c=>c.id==='ucTermSetting_txtDateFrom');
     if(!field)throw Error('期間の入力欄が見つかりません');
     await s.click('btnUpdate',{[field.name]:days[0].replaceAll('-','/')});
   } else await openOverview(s,item,days[0]);
-  if(s.form.tables.length!==1)throw Error('施設一覧の表が変わりました');
-  const matches=s.form.tables[0].rows.slice(1).flatMap((r,i)=>r[0]===item.room?[i+2]:[]);
-  if(matches.length!==1)throw Error('公式の部屋名が変わりました');
-  for(const day of days)s.selectDay(`dlRepeat$ctl00$tpItem$dgTable$ctl${String(matches[0]).padStart(2,'0')}$b${day.replaceAll('-','')}`);
+  const calendar=calendarDays(s.form,item.room),closed=[],selected=[];
+  for(const day of days) {
+    const info=calendar.get(day);if(!info)throw Error('指定日が施設一覧から消えています');
+    if(info.closed)closed.push(day);
+    else {s.selectDay(`dlRepeat$ctl00$tpItem$dgTable$ctl${String(info.row).padStart(2,'0')}$b${day.replaceAll('-','')}`);selected.push(day);}
+  }
+  const results=Object.fromEntries(closed.map(day=>[day,{closed:true}]));
+  if(!selected.length)return results;
   await s.click('ucPCFooter_btnForward');
   if(!s.url.includes('Wg_JikantaibetsuAkiJoukyou.aspx')||!s.html.includes(item.facility))throw Error('時間帯別の照会画面と一致しません');
-  const slots=parseDetail(s.form),received=new Set(slots.map(s=>s.date));
-  if(received.size!==days.length||days.some(d=>!received.has(d)))throw Error('取得した日付が不足しています');
-  return Object.fromEntries(days.map(day=>[day,slots.filter(s=>s.date===day)]));
+  const slots=parseDetail(s.form,null,allowedAreas),received=new Set(slots.map(s=>s.date));
+  if(received.size!==selected.length||selected.some(d=>!received.has(d)))throw Error('取得した日付が不足しています');
+  return {...results,...Object.fromEntries(selected.map(day=>[day,slots.filter(s=>s.date===day)]))};
 }

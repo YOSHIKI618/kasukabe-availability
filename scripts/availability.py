@@ -55,7 +55,7 @@ def minutes(value):
     return h * 60 + m
 
 
-def parse_detail(html, expected_date=None):
+def parse_detail(html, expected_date=None, allowed_areas=None):
     tables = TableReader(html).tables
     if not tables:
         raise ValueError('時間帯別の表がありません（取得失敗・画面変更）')
@@ -84,6 +84,8 @@ def parse_detail(html, expected_date=None):
                 raise ValueError('時間帯と状態の個数が不一致')
             label = row[0]
             occurrences[label] += 1
+            if allowed_areas is not None and label not in allowed_areas:
+                continue
             # 同名の面を混ぜない。同名行の番号は内部用であり公式の面名ではない。
             area_key = f'{label}#{occurrences[label]}'
             for (start, end), raw in zip(times, row[2:]):

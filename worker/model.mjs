@@ -34,6 +34,11 @@ export function windowsFor(slots, c) {
   return out;
 }
 export const cellKey = s => `${s.area_key}|${s.start}|${s.end}`;
+function recordSuccess(c,date,today,now) {
+  for(const d of Object.keys(c.samples)) if(d<=today||(!c.rolling&&d>c.dateTo)) delete c.samples[d];
+  if(c.errors) {delete c.errors[date];for(const d of Object.keys(c.errors))if(d<=today)delete c.errors[d];}
+  c.lastSuccess=now;c.error=Object.values(c.errors||{})[0]||null;if(!c.error)c.failures=0;
+}
 export function applyResult(state, input, now=Date.now()) {
   const c=state.conditions.find(c=>c.id===input.conditionId);
   if(!c || !c.enabled || c.revision!==input.revision) return {ignored:true};
@@ -54,6 +59,11 @@ export function applyResult(state, input, now=Date.now()) {
   if(!/^\d{4}-\d{2}-\d{2}$/.test(input.date||'')||(!c.rolling&&(input.date<c.dateFrom||input.date>c.dateTo))) throw Error('対象期間外の結果です');
   const day=(new Date(input.date+'T00:00:00Z').getUTCDay()+6)%7;
   if(!c.weekdays.includes(day)) throw Error('対象曜日外の結果です');
+  c.samples??={};
+  if(input.closed===true) {
+    c.samples[input.date]={closed:true,shape:null,cells:{},windows:[],checked:now};
+    recordSuccess(c,input.date,today,now);return {windows:0,changed:0,closed:true};
+  }
   const slots=input.slots;
   if(!Array.isArray(slots)||!slots.length||slots.length>6000) return fail('空き表が空、または想定外の大きさです');
   const seen=new Set();
@@ -64,9 +74,8 @@ export function applyResult(state, input, now=Date.now()) {
   const filtered=slots.filter(s=>c.areas.includes(s.area));
   if(!filtered.length || c.areas.some(a=>!filtered.some(s=>s.area===a))) return fail('指定した面区分が表から消えています');
   const shape=filtered.map(cellKey).sort().join('\n');
-  c.samples??={};
   const prev=c.samples[input.date];
-  if(prev && prev.shape!==shape) return fail('表の構成が変わりました。面区分を再確認して条件を保存し直してください');
+  if(prev && !prev.closed && prev.shape!==shape) return fail('表の構成が変わりました。面区分を再確認して条件を保存し直してください');
   const cells=Object.fromEntries(filtered.map(s=>[cellKey(s),s.state]));
   const windows=windowsFor(filtered,c);
   const changed=windows.filter(w=>w.cells.some(k=>!prev || prev.cells[k]!=='available'));
@@ -81,9 +90,7 @@ export function applyResult(state, input, now=Date.now()) {
     enqueue(state,{kind:'availability',title:'春日部の施設に空き',body,conditionId:c.id},now);
   }
   c.samples[input.date]={shape,cells,windows,checked:now};
-  for(const d of Object.keys(c.samples)) if(d<=today||(!c.rolling&&d>c.dateTo)) delete c.samples[d];
-  if(c.errors) {delete c.errors[input.date];for(const d of Object.keys(c.errors))if(d<=today)delete c.errors[d];}
-  c.lastSuccess=now;c.error=Object.values(c.errors||{})[0]||null;if(!c.error)c.failures=0;
+  recordSuccess(c,input.date,today,now);
   return {windows:windows.length, changed:changed.length};
 }
 export function time(m){return `${Math.floor(m/60)}:${String(m%60).padStart(2,'0')}`;}

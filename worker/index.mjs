@@ -25,7 +25,7 @@ async function authenticated(req,env) {
   return Number(expires)>Date.now()&&Number(expires)<Date.now()+32*86400000&&await equal(mac,await sign(expires,env.SESSION_SECRET));
 }
 function publicState(state) {
-  return {...state,subscriptions:state.subscriptions.map(s=>({id:s.id,created:s.created})),conditions:state.conditions.map(c=>{const {samples,...rest}=c;return {...rest,windows:Object.entries(samples||{}).flatMap(([date,x])=>x.windows.map(w=>({date,...w,checked:x.checked}))),scopeCount:Object.keys(samples||{}).length};})};
+  return {...state,subscriptions:state.subscriptions.map(s=>({id:s.id,created:s.created})),conditions:state.conditions.map(c=>{const {samples,...rest}=c;return {...rest,windows:Object.entries(samples||{}).flatMap(([date,x])=>x.windows.map(w=>({date,...w,checked:x.checked}))),closedDates:Object.entries(samples||{}).filter(([,x])=>x.closed).map(([date])=>date),scopeCount:Object.keys(samples||{}).length};})};
 }
 async function handle(req,env) {
   const url=new URL(req.url),p=url.pathname,now=Date.now();

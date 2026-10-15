@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -72,12 +73,34 @@ class CountRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req,fp,code,msg,headers,newurl)
 
 
-def collect(item, days, session=None):
+def calendar_days(table, room):
+    rows=table['rows']; header=rows[0]
+    match=re.fullmatch(r'(\d{4})年(\d{1,2})月',header[0])
+    found=[(i+2,row) for i,row in enumerate(rows[1:]) if row[0]==room]
+    if not match or len(found)!=1 or len(found[0][1])!=len(header):
+        raise ValueError('overview_dates_or_room')
+    year,month=map(int,match.groups()); previous=0; result={}
+    for index,label in enumerate(header[2:],2):
+        day_match=re.fullmatch(r'(\d{1,2})\s*([日月火水木金土])',label)
+        if not day_match:raise ValueError('overview_date_format')
+        number=int(day_match[1])
+        if number<previous:
+            month+=1
+            if month>12:month=1;year+=1
+        previous=number
+        current=date(year,month,number)
+        if '月火水木金土日'[current.weekday()]!=day_match[2]:raise ValueError('overview_weekday')
+        result[current.isoformat()]={'closed':found[0][1][index]=='休館','row':found[0][0]}
+    return result
+
+
+def collect(item, days, session=None, areas=None):
     s = session or BudgetSession()
     # 調査用Sessionの画面遷移ログも公開実行ログには出さない。
     with contextlib.redirect_stdout(io.StringIO()):
         if s.requests:
-            s.click('ucPCFooter_btnBack')
+            if 'Wg_JikantaibetsuAkiJoukyou.aspx' in s.url:s.click('ucPCFooter_btnBack')
+            if 'Wg_ShisetsubetsuAkiJoukyou.aspx' not in s.url:raise ValueError('overview_return')
             field=next(c['name'] for c in s.form.controls if c.get('id')=='ucTermSetting_txtDateFrom')
             s.click('btnUpdate',{field:days[0].strftime('%Y/%m/%d')})
         else:
@@ -85,19 +108,23 @@ def collect(item, days, session=None):
         tables = TableReader(s.html).tables
         if len(tables) != 1:
             raise ValueError('overview_structure')
-        matches = [i + 2 for i, row in enumerate(tables[0]['rows'][1:]) if row[0] == item['room']]
-        if len(matches) != 1:
-            raise ValueError('room_changed')
+        calendar=calendar_days(tables[0],item['room']); selected=[]; results={}
         for day in days:
-            s.select_day(f'dlRepeat$ctl00$tpItem$dgTable$ctl{matches[0]:02d}$b{day:%Y%m%d}')
+            info=calendar.get(day.isoformat())
+            if not info:raise ValueError('missing_overview_date')
+            if info['closed']:results[day.isoformat()]={'closed':True}
+            else:
+                s.select_day(f'dlRepeat$ctl00$tpItem$dgTable$ctl{info["row"]:02d}$b{day:%Y%m%d}')
+                selected.append(day)
+        if not selected:return results
         s.click('ucPCFooter_btnForward')
         if 'Wg_JikantaibetsuAkiJoukyou.aspx' not in s.url or item['facility'] not in s.html:
             raise ValueError('unexpected_page')
-        slots = parse_detail(s.html)
-    expected = {d.isoformat() for d in days}
+        slots = parse_detail(s.html,allowed_areas=item['areas'] if areas is None else areas)
+    expected = {d.isoformat() for d in selected}
     if {s['date'] for s in slots} != expected:
         raise ValueError('missing_dates')
-    return {day: [s for s in slots if s['date'] == day] for day in expected}
+    return {**results,**{day: [s for s in slots if s['date'] == day] for day in expected}}
 
 
 class API:
@@ -177,9 +204,10 @@ def main():
                 session=BudgetSession()
                 for group in batches(days):
                     try:
-                        results = collect(item, group, session)
+                        results = collect(item, group, session,c['areas'])
                         for day, slots in sorted(results.items()):
-                            posted=api.call('result', {'conditionId':c['id'],'revision':c['revision'],'date':day,'slots':slots})
+                            data={'closed':True} if isinstance(slots,dict) and slots.get('closed') else {'slots':slots}
+                            posted=api.call('result', {'conditionId':c['id'],'revision':c['revision'],'date':day,**data})
                             if posted.get('error'):failed=True
                     except Exception as e:
                         failed = True
