@@ -27,10 +27,10 @@ const explained=e=>({network:'予約サイトとの通信が時間切れ、ま�
 export class AvailabilityMonitor {
   constructor(ctx,env,options={}) {this.ctx=ctx;this.env=env;this.transport=options.fetch||((...args)=>fetch(...args));this.collector=options.collect||collect;this.now=options.now||Date.now;this.calls=0;this.job=null;}
   async meta() {return await this.ctx.storage.get('meta')||fresh();}
-  async changeMeta(fn) {return this.ctx.storage.transaction(async tx=>{const m=await tx.get('meta')||fresh(),before=JSON.stringify(m);fn(m);if(JSON.stringify(m)!==before)await tx.put('meta',m);return m;});}
+  async changeMeta(fn) {return this.ctx.storage.transaction(async tx=>{const m=await tx.get('meta')||fresh(),before=JSON.stringify(m);if(m.recentIssues)m.recentIssues=m.recentIssues.filter(x=>x.at>this.now()-14*86400000);fn(m);if(JSON.stringify(m)!==before)await tx.put('meta',m);return m;});}
   async status() {
     const m=await this.meta(),job=await this.ctx.storage.get('job');
-    return {...m,implementation:'2026-10-16.1',retryAt:job?.phaseRetryAt||null,running:Boolean(job),notifyOnly:job?.notifyOnly||false,conditionIndex:job?.conditionIndex||0,conditionCount:job?.plans.length||0,
+    return {...m,implementation:'2026-10-16.2',retryAt:job?.phaseRetryAt||null,running:Boolean(job),notifyOnly:job?.notifyOnly||false,conditionIndex:job?.conditionIndex||0,conditionCount:job?.plans.length||0,
       siteRequests:await this.ctx.storage.get('siteCount')||0,alarmAt:await this.ctx.storage.getAlarm()};
   }
   async fetch(req) {
@@ -99,6 +99,7 @@ export class AvailabilityMonitor {
     this.job.maxStoredBytes=Math.max(this.job.maxStoredBytes||0,packed.storedBytes);
   }
   async issue(error,condition,days,retrying=false) {
+    error.monitorRecorded=true;
     const detail=diagnostic(error),entry={id:crypto.randomUUID(),at:this.now(),conditionId:condition?.id||null,
       facility:condition?.facility||'クラウド全体',room:condition?.room||'',dates:[...days],unresolvedDates:[...days],
       code:errorKind(error),message:explained(error),status:error.status||null,retrying,detail};
@@ -119,7 +120,9 @@ export class AvailabilityMonitor {
     const plans=notifyOnly?[]:start.conditions.map(c=>{
       const item=catalog.find(i=>i.id===c.catalogId);if(!item)throw new MonitorError('api');
       const condition=Object.fromEntries(['id','catalogId','revision','areas','weekdays','start','end','minimum','rolling','dateFrom','dateTo','name','facility','room'].map(k=>[k,c[k]]));
-      const days=targetDays(condition,item,this.now());return {condition,item,period:'rbtnMonth',groups:batches(days,28,8),days:days.length,end:acceptanceEnd(item.sports,this.now())};
+      const recentLargeFailure=(meta.recentIssues||[]).some(e=>e.conditionId===c.id&&(e.dates||[]).length>4&&['network','http_temporary'].includes(e.code)&&e.at>this.now()-24*HOUR);
+      const days=targetDays(condition,item,this.now()),small=(meta.smallBatchUntil?.[item.id]||0)>this.now()||recentLargeFailure;
+      return {condition,item,period:small?'rbtnTwoWeek':'rbtnMonth',groups:batches(days,small?14:28,small?4:8),days:days.length,end:acceptanceEnd(item.sports,this.now())};
     });
     this.job={owner:start.owner,started:this.now(),notifyOnly,plans,conditionIndex:0,groupIndex:0,siteRequests:0,
       failed:false,retrySiteAt:start.retrySiteAt||0,notificationSerialSeen:meta.notificationSerial,apiRequests:1,alarms:0};
@@ -164,7 +167,7 @@ export class AvailabilityMonitor {
         await this.issue(e,c,days,retryable&&!job.groupRetry);
         if(retryable&&!job.groupRetry) {
           job.groupRetry=1;job.phaseRetryAt=this.now()+30000;await this.ctx.storage.delete('session');
-          if(plan.period==='rbtnMonth') {plan.groups.splice(job.groupIndex,plan.groups.length-job.groupIndex,...batches(plan.groups.slice(job.groupIndex).flat(),14,4));plan.period='rbtnTwoWeek';}
+          if(plan.period==='rbtnMonth') {await this.changeMeta(m=>{m.smallBatchUntil??={};m.smallBatchUntil[plan.item.id]=this.now()+24*HOUR;});plan.groups.splice(job.groupIndex,plan.groups.length-job.groupIndex,...batches(plan.groups.slice(job.groupIndex).flat(),14,4));plan.period='rbtnTwoWeek';}
           await this.saveJob();return;
         }
         job.failed=true;await this.ctx.storage.delete('session');
@@ -222,8 +225,9 @@ export class AvailabilityMonitor {
       if(this.job.conditionIndex>=this.job.plans.length)await this.finish();
       else {await this.saveJob();await this.ctx.storage.setAlarm(this.job.phaseRetryAt||this.now()+3000);}
     } catch(e) {
+      if(!e.monitorRecorded&&!(e instanceof MonitorError&&e.code==='stopped'))await this.issue(e,null,[],Boolean(this.job&&e instanceof MonitorError&&e.code==='api'&&(e.status===0||e.status>=500)&&!this.job.apiRetry));
       if(this.job&&e instanceof MonitorError&&e.code==='api'&&(e.status===0||e.status>=500)&&!this.job.apiRetry) {
-        this.job.apiRetry=1;this.job.phaseRetryAt=this.now()+30000;await this.issue(e,null,[],true);await this.saveJob();await this.ctx.storage.setAlarm(this.job.phaseRetryAt);return;
+        this.job.apiRetry=1;this.job.phaseRetryAt=this.now()+30000;await this.saveJob();await this.ctx.storage.setAlarm(this.job.phaseRetryAt);return;
       }
       if(this.job)await this.finish(e instanceof MonitorError&&e.code==='stopped'?null:e);
       else {meta=await this.changeMeta(m=>{m.lastError=safeError(e);if(m.enabled)m.nextMonitorAt=this.now()+HOUR;});await this.scheduleIdle(meta);}
