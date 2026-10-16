@@ -1,6 +1,7 @@
 import catalog from '../public/catalog.json' with {type:'json'};
 import {SiteSession,SiteError,collect,targetDays,batches,acceptanceEnd} from './collector.mjs';
 import {makePushRequest} from './push.mjs';
+import {packStored,unpackStored} from './storage-codec.mjs';
 
 const HOUR=3600000;
 const fresh=()=>({enabled:false,nextMonitorAt:null,notificationSerial:0,handledNotificationSerial:0});
@@ -13,15 +14,23 @@ const safeError=e=>e instanceof SiteError?'公開照会の通信に失敗しま�
 }[e.code]||'クラウドの確認処理でエラーが発生しました':'公開照会の取得・解析に失敗しました。前回の正常結果を保持しています';
 // 公開照会の実行環境の互換性診断。URLや長い状態値を保存・表示しない。
 const diagnostic=e=>({name:String(e.name).slice(0,40),message:String(e.message).replace(/https?:\/\/\S+|[A-Za-z0-9_+/=-]{40,}/g,'[省略]').slice(0,180)});
+export function errorKind(e) {
+  if(e instanceof SiteError)return [403,429].includes(e.status)?'restricted':e.status===408||e.status>=500?'http_temporary':'http';
+  if(e?.code==='api')return 'storage';
+  if(['site_budget','phase_budget','run_budget','snapshot'].includes(e?.code))return 'budget';
+  if(['AbortError','TimeoutError'].includes(e?.name)||/fetch failed|network|connection|timed? ?out|aborted/i.test(e?.message||''))return 'network';
+  return 'parse';
+}
+const explained=e=>({network:'予約サイトとの通信が時間切れ、または一時的に切断されました',http_temporary:'予約サイトが一時的な通信エラーを返しました',restricted:'予約サイトのアクセス制限を検出したため確認を中断しました',storage:'確認結果の保存先との通信に失敗しました',budget:safeError(e),http:safeError(e),parse:'予約サイトの表示を判定できません：'+diagnostic(e).message}[errorKind(e)]);
 
 // 1人用に名前を固定し、本番のObjectは1個だけ作る。SQLite型の無料枠を利用。
 export class AvailabilityMonitor {
-  constructor(ctx,env,options={}) {this.ctx=ctx;this.env=env;this.transport=options.fetch||((...args)=>fetch(...args));this.now=options.now||Date.now;this.calls=0;this.job=null;}
+  constructor(ctx,env,options={}) {this.ctx=ctx;this.env=env;this.transport=options.fetch||((...args)=>fetch(...args));this.collector=options.collect||collect;this.now=options.now||Date.now;this.calls=0;this.job=null;}
   async meta() {return await this.ctx.storage.get('meta')||fresh();}
-  async changeMeta(fn) {return this.ctx.storage.transaction(async tx=>{const m=await tx.get('meta')||fresh();fn(m);await tx.put('meta',m);return m;});}
+  async changeMeta(fn) {return this.ctx.storage.transaction(async tx=>{const m=await tx.get('meta')||fresh(),before=JSON.stringify(m);fn(m);if(JSON.stringify(m)!==before)await tx.put('meta',m);return m;});}
   async status() {
     const m=await this.meta(),job=await this.ctx.storage.get('job');
-    return {...m,implementation:'2026-10-15.2',running:Boolean(job),notifyOnly:job?.notifyOnly||false,conditionIndex:job?.conditionIndex||0,conditionCount:job?.plans.length||0,
+    return {...m,implementation:'2026-10-16.1',retryAt:job?.phaseRetryAt||null,running:Boolean(job),notifyOnly:job?.notifyOnly||false,conditionIndex:job?.conditionIndex||0,conditionCount:job?.plans.length||0,
       siteRequests:await this.ctx.storage.get('siteCount')||0,alarmAt:await this.ctx.storage.getAlarm()};
   }
   async fetch(req) {
@@ -54,12 +63,15 @@ export class AvailabilityMonitor {
     return kind==='api'&&this.env.APP_API?this.env.APP_API.fetch(input,init):this.transport(input,init);
   }
   async api(path,data={},job=this.job) {
+    if(job)job.apiRequests=(job.apiRequests||0)+1;
     const req=new Request(this.env.SELF_URL+'/api/runner/'+path,{method:'POST',headers:{
       'Content-Type':'application/json','Authorization':'Bearer '+this.env.RUNNER_TOKEN,'X-Run-Owner':job?.owner||'','User-Agent':'KasukabeMonitor/1.0'
     },body:JSON.stringify(data),signal:AbortSignal.timeout(25000)});
-    const r=await this.outbound('api',req);
-    if(!r.ok) {await r.body?.cancel();throw new MonitorError('api',r.status);}
-    return r.json();
+    try {
+      const r=await this.outbound('api',req);
+      if(!r.ok) {await r.body?.cancel();throw new MonitorError('api',r.status);}
+      return await r.json();
+    } catch(e) {if(e instanceof MonitorError)throw e;throw new MonitorError('api');}
   }
   async deliver(excludeInitialFor=[],limit=2) {
     for(let i=0;i<limit&&this.calls<=33;i++) {
@@ -81,30 +93,51 @@ export class AvailabilityMonitor {
     }
   }
   async saveJob() {await this.ctx.storage.put('job',this.job);}
+  async savePacked(key,value) {
+    const packed=await packStored(value);await this.ctx.storage.put(key,packed.value);
+    this.job.maxRawBytes=Math.max(this.job.maxRawBytes||0,packed.rawBytes);
+    this.job.maxStoredBytes=Math.max(this.job.maxStoredBytes||0,packed.storedBytes);
+  }
+  async issue(error,condition,days,retrying=false) {
+    const detail=diagnostic(error),entry={id:crypto.randomUUID(),at:this.now(),conditionId:condition?.id||null,
+      facility:condition?.facility||'クラウド全体',room:condition?.room||'',dates:[...days],unresolvedDates:[...days],
+      code:errorKind(error),message:explained(error),status:error.status||null,retrying,detail};
+    await this.changeMeta(m=>{if(!retrying)for(const old of m.recentIssues||[])if(old.conditionId===entry.conditionId&&!old.resolvedAt&&old.dates.some(d=>days.includes(d)))old.retrying=false;m.recentIssues=[...(m.recentIssues||[]).filter(x=>x.at>this.now()-14*86400000),entry].slice(-40);m.lastCollectionIssue=detail;});
+    return entry.id;
+  }
+  async resolve(conditionId,days) {
+    const good=new Set(days);
+    await this.changeMeta(m=>{for(const e of m.recentIssues||[])if(!e.resolvedAt&&e.conditionId===conditionId){
+      e.unresolvedDates=(e.unresolvedDates||e.dates).filter(d=>!good.has(d));if(!e.unresolvedDates.length){e.resolvedAt=this.now();e.retrying=false;}
+    }});
+  }
   excluded() {return this.job.plans.slice(this.job.conditionIndex).map(p=>p.condition.id);}
   async begin(meta) {
     const notifyOnly=!meta.enabled||(meta.nextMonitorAt||0)>this.now()+1000;
     const start=await this.api('start',{source:'cloudflare',event:'alarm',notifyOnly},null);
+    if(start.protocol!==2){try{await this.api('end',{},start);}catch{}throw new MonitorError('api',503);}
     const plans=notifyOnly?[]:start.conditions.map(c=>{
       const item=catalog.find(i=>i.id===c.catalogId);if(!item)throw new MonitorError('api');
       const condition=Object.fromEntries(['id','catalogId','revision','areas','weekdays','start','end','minimum','rolling','dateFrom','dateTo','name','facility','room'].map(k=>[k,c[k]]));
-      const days=targetDays(condition,item,this.now());return {condition,item,groups:batches(days),days:days.length,end:acceptanceEnd(item.sports,this.now())};
+      const days=targetDays(condition,item,this.now());return {condition,item,period:'rbtnMonth',groups:batches(days,28,8),days:days.length,end:acceptanceEnd(item.sports,this.now())};
     });
     this.job={owner:start.owner,started:this.now(),notifyOnly,plans,conditionIndex:0,groupIndex:0,siteRequests:0,
-      failed:false,retrySiteAt:start.retrySiteAt||0,notificationSerialSeen:meta.notificationSerial};
+      failed:false,retrySiteAt:start.retrySiteAt||0,notificationSerialSeen:meta.notificationSerial,apiRequests:1,alarms:0};
     await this.ctx.storage.put('siteCount',0);await this.saveJob();
     await this.changeMeta(m=>{m.waitingForRun=false;if(!notifyOnly){m.lastError=null;m.nextMonitorAt=this.now()+HOUR;}});
   }
   async finish(error=null) {
     const job=this.job;if(!job)return;
     if(error)job.failed=true;
-    try {await this.api('end',{error:job.failed||this.now()<job.retrySiteAt,retrySiteAt:job.retrySiteAt});}
+    const stats={siteRequests:job.siteRequests,apiRequests:(job.apiRequests||0)+1,alarms:job.alarms||0,elapsedMs:this.now()-job.started,maxRawBytes:job.maxRawBytes||0,maxStoredBytes:job.maxStoredBytes||0};
+    try {await this.api('end',{error:job.failed||this.now()<job.retrySiteAt,retrySiteAt:job.retrySiteAt,stats});}
     catch {error=error||new MonitorError('api');}
     await this.ctx.storage.delete(['job','session','pending','siteCount']);this.job=null;
     const m=await this.changeMeta(m=>{
       m.handledNotificationSerial=Math.max(m.handledNotificationSerial,job.notificationSerialSeen);
       m.lastCompletedAt=this.now();m.waitingForRun=false;
-      if(!job.notifyOnly){m.lastSiteRequests=job.siteRequests;m.lastError=error?safeError(error):job.failed?'一部の対象日を取得できませんでした。条件ごとの取得エラーを確認してください':null;if(!m.lastError)delete m.lastCollectionIssue;}
+      if(!job.notifyOnly){m.lastStats=stats;m.lastSiteRequests=job.siteRequests;m.lastError=error?explained(error):job.failed?'一部の対象日を取得できませんでした。条件ごとの取得エラーを確認してください':null;if(!m.lastError)delete m.lastCollectionIssue;}
+      if(!error&&!job.failed)for(const e of m.recentIssues||[])if(!e.conditionId&&!e.resolvedAt){e.resolvedAt=this.now();e.retrying=false;}
       if(m.enabled)m.nextMonitorAt=Math.max(m.nextMonitorAt||this.now()+HOUR,job.retrySiteAt||0,this.now()+3000);
     });
     await this.scheduleIdle(m);
@@ -118,19 +151,24 @@ export class AvailabilityMonitor {
     if(job.groupIndex===0)await this.api('coverage',{id:c.id,revision:c.revision,end:plan.end,days:plan.days});
     if(!plan.groups.length) {job.conditionIndex++;await this.saveJob();return;}
     const days=plan.groups[job.groupIndex];
-    let pending=await this.ctx.storage.get('pending');
+    let pending=await unpackStored(await this.ctx.storage.get('pending'));
     if(!pending) {
-      const session=new SiteSession((url,init)=>this.outbound('site',url,init),await this.ctx.storage.get('session'));
+      const session=new SiteSession((url,init)=>this.outbound('site',url,init),await unpackStored(await this.ctx.storage.get('session')),{period:plan.period||'rbtnTwoWeek'});
       try {
-        pending={results:await collect(session,plan.item,days,c.areas),index:0,days};
+        pending={results:await this.collector(session,plan.item,days,c.areas),index:0,days};
         const snapshot=session.snapshot();
-        if(new TextEncoder().encode(JSON.stringify(snapshot)).length>1900000)throw new MonitorError('snapshot');
-        await this.ctx.storage.put('session',snapshot);await this.ctx.storage.put('pending',pending);
+        await this.savePacked('session',snapshot);await this.savePacked('pending',pending);
       } catch(e) {
         if(e instanceof MonitorError&&e.code==='stopped')throw e;
-        await this.changeMeta(m=>{m.lastCollectionIssue=diagnostic(e);});
+        const retryable=['network','http_temporary'].includes(errorKind(e));
+        await this.issue(e,c,days,retryable&&!job.groupRetry);
+        if(retryable&&!job.groupRetry) {
+          job.groupRetry=1;job.phaseRetryAt=this.now()+30000;await this.ctx.storage.delete('session');
+          if(plan.period==='rbtnMonth') {plan.groups.splice(job.groupIndex,plan.groups.length-job.groupIndex,...batches(plan.groups.slice(job.groupIndex).flat(),14,4));plan.period='rbtnTwoWeek';}
+          await this.saveJob();return;
+        }
         job.failed=true;await this.ctx.storage.delete('session');
-        for(const date of days)await this.api('result',{conditionId:c.id,revision:c.revision,date,error:safeError(e)});
+        for(let i=0;i<days.length;i+=4)await this.api('results',{results:days.slice(i,i+4).map(date=>({conditionId:c.id,revision:c.revision,date,error:explained(e)}))});
         if(e instanceof SiteError&&[403,429].includes(e.status)) {
           const raw=e.retryAfter,delay=/^\d+$/.test(raw)?Number(raw)*1000:Date.parse(raw)-this.now();
           job.retrySiteAt=this.now()+Math.max(HOUR,Number.isFinite(delay)?delay:HOUR);throw e;
@@ -139,13 +177,19 @@ export class AvailabilityMonitor {
       }
     }
     if(pending)for(;pending.index<days.length;) {
-      const date=days[pending.index],data=pending.results[date];
-      const result=await this.api('result',{conditionId:c.id,revision:c.revision,date,...(data?.closed===true?{closed:true}:{slots:data})});
-      if(result.error)job.failed=true;
-      pending.index++;await this.ctx.storage.put('pending',pending);
+      const selected=days.slice(pending.index,pending.index+4),good=[];
+      const payload=selected.map(date=>{const data=pending.results[date];return {conditionId:c.id,revision:c.revision,date,...(data?.error?{error:data.error}:data?.closed===true?{closed:true}:{slots:data})};});
+      const response=await this.api('results',{results:payload});
+      for(let i=0;i<selected.length;i++) {
+        const data=pending.results[selected[i]],result=response.results[i];
+        if(result.error){job.failed=true;await this.issue(Error(result.error),c,[selected[i]]);}
+        else if(!result.ignored&&!data?.error)good.push(selected[i]);
+      }
+      if(good.length)await this.resolve(c.id,good);
+      pending.index+=selected.length;await this.savePacked('pending',pending);
     }
-    await this.ctx.storage.delete('pending');job.groupIndex++;
-    if(job.groupIndex>=plan.groups.length) {job.conditionIndex++;job.groupIndex=0;await this.ctx.storage.delete('session');}
+    await this.ctx.storage.delete('pending');job.groupIndex++;job.groupRetry=0;job.phaseRetryAt=null;job.apiRetry=0;
+    if(job.groupIndex>=plan.groups.length) {job.conditionIndex++;job.groupIndex=0;const next=job.plans[job.conditionIndex];if(!next||next.item.facility!==plan.item.facility||next.period!==plan.period)await this.ctx.storage.delete('session');}
     await this.saveJob();
   }
   async alarm() {
@@ -165,16 +209,22 @@ export class AvailabilityMonitor {
         }
       }
       this.job.siteRequests=await this.ctx.storage.get('siteCount')||0;
+      this.job.alarms=(this.job.alarms||0)+1;
       if(this.now()-this.job.started>30*60000)throw new MonitorError('run_budget');
       meta=await this.meta();this.job.notificationSerialSeen=meta.notificationSerial;
       await this.deliver(this.excluded(),this.job.notifyOnly?8:2);
       meta=await this.meta();
       if(this.job.notifyOnly||!meta.enabled||this.now()<this.job.retrySiteAt) {await this.finish();return;}
+      if(this.job.phaseRetryAt>this.now()){await this.ctx.storage.setAlarm(this.job.phaseRetryAt);return;}
+      this.job.phaseRetryAt=null;
       if(this.job.conditionIndex<this.job.plans.length)await this.processGroup();
       await this.deliver(this.excluded());
       if(this.job.conditionIndex>=this.job.plans.length)await this.finish();
-      else {await this.saveJob();await this.ctx.storage.setAlarm(this.now()+3000);}
+      else {await this.saveJob();await this.ctx.storage.setAlarm(this.job.phaseRetryAt||this.now()+3000);}
     } catch(e) {
+      if(this.job&&e instanceof MonitorError&&e.code==='api'&&(e.status===0||e.status>=500)&&!this.job.apiRetry) {
+        this.job.apiRetry=1;this.job.phaseRetryAt=this.now()+30000;await this.issue(e,null,[],true);await this.saveJob();await this.ctx.storage.setAlarm(this.job.phaseRetryAt);return;
+      }
       if(this.job)await this.finish(e instanceof MonitorError&&e.code==='stopped'?null:e);
       else {meta=await this.changeMeta(m=>{m.lastError=safeError(e);if(m.enabled)m.nextMonitorAt=this.now()+HOUR;});await this.scheduleIdle(meta);}
     }

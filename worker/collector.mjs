@@ -72,6 +72,20 @@ export function parseDetail(htmlOrForm,expectedDate=null,allowedAreas=null) {
   }
   return out;
 }
+export function parseSelectedDays(form,days,areas) {
+  const tables=new Map();
+  for(const table of form.tables) {
+    const m=table.rows[0]?.[0]?.normalize('NFKC').match(/(\d{4})年(\d+)月(\d+)日/);
+    if(!m)throw Error('照会日の見出しがありません');
+    const date=`${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+    if(tables.has(date))throw Error('照会日が重複しています');tables.set(date,table);
+  }
+  if(tables.size!==days.length||days.some(d=>!tables.has(d)))throw Error('取得した日付が不足しています');
+  return Object.fromEntries(days.map(date=>{
+    try{return [date,parseDetail({tables:[tables.get(date)]},date,areas)];}
+    catch(e){return [date,{error:String(e.message).slice(0,180),code:'parse'}];}
+  }));
+}
 export function acceptanceEnd(sports,now=Date.now()) {
   const d=new Date(now+9*3600000);
   const released=d.getUTCDate()>15||(d.getUTCDate()===15&&d.getUTCHours()>=10);
@@ -87,9 +101,9 @@ export function targetDays(c,item,now=Date.now()) {
   }
   return days;
 }
-export function batches(days) {
+export function batches(days,span=14,maxDates=Infinity) {
   const out=[];let rest=[...days];
-  while(rest.length) {const first=Date.parse(rest[0]);const group=rest.filter(d=>Date.parse(d)-first<14*86400000);out.push(group);rest=rest.slice(group.length);}
+  while(rest.length) {const first=Date.parse(rest[0]);const group=rest.filter(d=>Date.parse(d)-first<span*86400000).slice(0,maxDates);out.push(group);rest=rest.slice(group.length);}
   return out;
 }
 export function calendarDays(form,room) {
@@ -111,12 +125,15 @@ export function calendarDays(form,room) {
 }
 
 export class SiteSession {
-  constructor(siteFetch,snapshot=null) {
+  constructor(siteFetch,snapshot=null,options={}) {
     this.siteFetch=siteFetch;this.url=snapshot?.url||OFFICIAL;this.requests=snapshot?.requests||0;
     this.cookies=new Map(snapshot?.cookies||[]);this.form=snapshot?.form||null;this.html='';
+    this.period=snapshot?.period||options.period||'rbtnTwoWeek';
   }
   snapshot() {
-    return {url:this.url,requests:this.requests,cookies:[...this.cookies],form:{fields:this.form.fields,controls:this.form.controls,action:this.form.action}};
+    const keys=['id','name','type','value','pb','onclick','groupname','disabled'];
+    const controls=this.form.controls.filter(c=>(c.type||'').toLowerCase()!=='hidden').map(c=>Object.fromEntries(keys.filter(k=>k in c).map(k=>[k,c[k]])));
+    return {url:this.url,requests:this.requests,period:this.period,cookies:[...this.cookies],form:{fields:this.form.fields,controls,action:this.form.action}};
   }
   async read(path=null,data=null) {
     if(this.requests)await wait(2000);
@@ -126,7 +143,7 @@ export class SiteSession {
       if(!url.startsWith(OFFICIAL))throw Error('公式照会サイト外への通信を停止しました');
       const headers={'User-Agent':'KasukabeAvailabilityMonitor/1.0 (personal read-only check)','Cookie':[...this.cookies].map(([k,v])=>k+'='+v).join('; ')};
       if(body)headers['Content-Type']='application/x-www-form-urlencoded';
-      const response=await this.siteFetch(url,{method,body,headers,redirect:'manual',signal:AbortSignal.timeout(25000)});
+      const response=await this.siteFetch(url,{method,body,headers,redirect:'manual',signal:AbortSignal.timeout(35000)});
       for(const raw of response.headers.getSetCookie?.()||response.headers.getAll?.('Set-Cookie')||[]) {
         const pair=raw.split(';')[0],at=pair.indexOf('=');if(at>0)this.cookies.set(pair.slice(0,at),pair.slice(at+1));
       }
@@ -175,7 +192,7 @@ export async function openOverview(s,item,day) {
   }
   if(!found)throw Error('公式の施設名が見つかりません');
   await s.click('ucPCFooter_btnForward');
-  for(const c of s.form.controls)if((c.id||'').startsWith('rbtn'))s.form.fields['h_'+c.name]=['rbtnTwoWeek','rbtnAllday'].includes(c.id)?'True':'False';
+  for(const c of s.form.controls)if((c.id||'').startsWith('rbtn'))s.form.fields['h_'+c.name]=[s.period||'rbtnTwoWeek','rbtnAllday'].includes(c.id)?'True':'False';
   const [y,m,d]=day.split('-');
   await s.click('ucPCFooter_btnForward',{txtYear:y,txtMonth:String(Number(m)),txtDay:String(Number(d))});
 }
@@ -197,7 +214,5 @@ export async function collect(s,item,days,allowedAreas=item.areas) {
   if(!selected.length)return results;
   await s.click('ucPCFooter_btnForward');
   if(!s.url.includes('Wg_JikantaibetsuAkiJoukyou.aspx')||!s.html.includes(item.facility))throw Error('時間帯別の照会画面と一致しません');
-  const slots=parseDetail(s.form,null,allowedAreas),received=new Set(slots.map(s=>s.date));
-  if(received.size!==selected.length||selected.some(d=>!received.has(d)))throw Error('取得した日付が不足しています');
-  return {...results,...Object.fromEntries(selected.map(day=>[day,slots.filter(s=>s.date===day)]))};
+  return {...results,...parseSelectedDays(s.form,selected,allowedAreas)};
 }

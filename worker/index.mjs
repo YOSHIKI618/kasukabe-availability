@@ -6,11 +6,12 @@ const enc=new TextEncoder();
 async function digest(s) {return [...new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(s)))].map(x=>x.toString(16).padStart(2,'0')).join('');}
 async function equal(a,b){return typeof a==='string'&&typeof b==='string'&&await digest(a)===await digest(b);}
 async function sign(s,key) {const k=await crypto.subtle.importKey('raw',enc.encode(key),{name:'HMAC',hash:'SHA-256'},false,['sign']);return [...new Uint8Array(await crypto.subtle.sign('HMAC',k,enc.encode(s)))].map(x=>x.toString(16).padStart(2,'0')).join('');}
-async function read(env) {const row=await env.DB.prepare('SELECT value,version FROM documents WHERE id=?').bind('app').first();return row?{state:JSON.parse(row.value),version:row.version}:{state:initialState(),version:-1};}
+async function read(env) {const row=await env.DB.prepare('SELECT value,version FROM documents WHERE id=?').bind('app').first();return row?{state:JSON.parse(row.value),version:row.version,serialized:row.value}:{state:initialState(),version:-1};}
 async function mutate(env, fn) {
   for(let i=0;i<5;i++) {
-    const {state,version}=await read(env);const result=fn(state);
+    const {state,version,serialized}=await read(env);const result=fn(state);
     const value=JSON.stringify(state);
+    if(value===serialized)return result;
     if(enc.encode(value).length>1600000) throw Error('保存容量のアプリ上限です。期間・条件数を減らしてください');
     const r=version===-1 ? await env.DB.prepare('INSERT OR IGNORE INTO documents(id,value,version) VALUES(?,?,0)').bind('app',value).run()
       :await env.DB.prepare('UPDATE documents SET value=?,version=version+1 WHERE id=? AND version=?').bind(value,'app',version).run();
@@ -25,7 +26,7 @@ async function authenticated(req,env) {
   return Number(expires)>Date.now()&&Number(expires)<Date.now()+32*86400000&&await equal(mac,await sign(expires,env.SESSION_SECRET));
 }
 function publicState(state) {
-  return {...state,subscriptions:state.subscriptions.map(s=>({id:s.id,created:s.created})),conditions:state.conditions.map(c=>{const {samples,...rest}=c;return {...rest,windows:Object.entries(samples||{}).flatMap(([date,x])=>x.windows.map(w=>({date,...w,checked:x.checked}))),closedDates:Object.entries(samples||{}).filter(([,x])=>x.closed).map(([date])=>date),scopeCount:Object.keys(samples||{}).length};})};
+  return {...state,subscriptions:state.subscriptions.map(s=>({id:s.id,created:s.created})),conditions:state.conditions.map(c=>{const {samples,layouts,...rest}=c;return {...rest,windows:Object.entries(samples||{}).flatMap(([date,x])=>x.windows.map(({cells,...w})=>({date,...w,checked:x.checked}))),closedDates:Object.entries(samples||{}).filter(([,x])=>x.closed).map(([date])=>date),scopeCount:Object.keys(samples||{}).length};})};
 }
 async function handle(req,env) {
   const url=new URL(req.url),p=url.pathname,now=Date.now();
@@ -62,11 +63,15 @@ async function handle(req,env) {
         }
         s.runnerError=null;});
       const state=(await read(env)).state;
-      return json({owner,retrySiteAt:state.retrySiteAt||0,conditions:state.conditions.filter(c=>c.enabled)});
+      return json({owner,protocol:2,retrySiteAt:state.retrySiteAt||0,conditions:state.conditions.filter(c=>c.enabled)});
     }
     const owner=req.headers.get('x-run-owner');const lock=await env.DB.prepare('SELECT owner,expires FROM locks WHERE id=?').bind('runner').first();
     if(!lock||lock.owner!==owner||lock.expires<now)return json({error:'実行ロックの期限切れです'},409);
-    if(p==='/api/runner/result'&&req.method==='POST') {const b=await body(req);return json(await mutate(env,s=>applyResult(s,b,now)));}
+    if(p==='/api/runner/result'&&req.method==='POST') {const b=await body(req);return json(await mutate(env,s=>applyResult(s,{...b,cycleId:owner},now)));}
+    if(p==='/api/runner/results'&&req.method==='POST') {
+      const b=await body(req);if(!Array.isArray(b.results)||!b.results.length||b.results.length>4)throw Error('結果は1～4日分ずつ送信してください');
+      return json(await mutate(env,s=>({results:b.results.map(r=>applyResult(s,{...r,cycleId:owner},now))})));
+    }
     if(p==='/api/runner/coverage'&&req.method==='POST') {const b=await body(req);await mutate(env,s=>{const c=s.conditions.find(c=>c.id===b.id&&c.revision===b.revision);if(c){c.lastCycle=now;c.coverageEnd=b.end;c.scheduledDays=b.days;}});return json({ok:true});}
     if(p==='/api/runner/claim'&&req.method==='POST') {
       const b=await body(req);
@@ -99,7 +104,7 @@ async function handle(req,env) {
   if(p==='/api/state'&&req.method==='GET') {
     const state=(await read(env)).state;
     const monitor=env.MONITOR?await(await env.MONITOR.get(env.MONITOR.idFromName('personal')).fetch('https://monitor/status')).json():null;
-    return json({...publicState(state),monitor,schedulerReady:env.SCHEDULER_READY==='true',vapidPublicKey:env.VAPID_PUBLIC_KEY,githubUrl:env.GITHUB_REPO_URL||null});
+    return json({...publicState(state),stateFormatVersion:2,monitor,schedulerReady:env.SCHEDULER_READY==='true',vapidPublicKey:env.VAPID_PUBLIC_KEY,githubUrl:env.GITHUB_REPO_URL||null});
   }
   if(p==='/api/monitor-control'&&req.method==='POST') {
     if(!env.MONITOR)return json({error:'クラウドの時計がまだ設置されていません'},503);

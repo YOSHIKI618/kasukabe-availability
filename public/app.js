@@ -14,8 +14,9 @@ function render(){
   const monitor=state.monitor,automatic=monitor?state.lastCloudflareRunner:state.lastGithubScheduledRunner||state.lastScheduledRunner;
   const pausedAll=monitor&&!monitor.enabled;
   $('health').textContent=pausedAll?'定期確認を停止中です':!state.schedulerReady?'定期実行の設定が未完了です':monitor?.lastError||state.runnerError||(!automatic?'時刻による自動起動の初回確認中です':Date.now()-automatic>100*60000?'定期確認が遅れています':'最終自動起動 '+dt(automatic));
+  const retry=monitor?.retryAt&&monitor.retryAt>Date.now()?`一時的な失敗のため ${dt(monitor.retryAt)} に再確認します。`:'';
   const progress=monitor?.running?(monitor.notifyOnly?'通知を配信中です。':monitor.conditionCount?`確認中：${Math.min(monitor.conditionIndex+1,monitor.conditionCount)} / ${monitor.conditionCount}条件。`:'保存した条件を確認しています。'):'';
-  $('next').textContent=monitor?(pausedAll?'「定期確認を再開」で保存した条件の確認を始めます。':progress+`次回の目安 ${dt(monitor.nextMonitorAt)}。約1時間ごとに確認し、PCの起動は不要です。`):state.schedulerReady?'次回は毎時57分ごろ（遅延あり）。PCの起動は不要です。':'クラウドの定期実行を設置・検証中です。画面には検証時の取得結果を表示しています。';
+  $('next').textContent=monitor?(pausedAll?'「定期確認を再開」で保存した条件の確認を始めます。':retry+progress+`次回の目安 ${dt(monitor.nextMonitorAt)}。約1時間ごとに確認し、PCの起動は不要です。`):state.schedulerReady?'次回は毎時57分ごろ（遅延あり）。PCの起動は不要です。':'クラウドの定期実行を設置・検証中です。画面には検証時の取得結果を表示しています。';
   $('monitorControls').classList.toggle('hidden',!monitor);$('pauseAll').classList.toggle('hidden',!monitor?.enabled);$('resumeAll').classList.toggle('hidden',Boolean(monitor?.enabled));
   if(state.githubUrl){$('github').href=state.githubUrl+'/actions/workflows/monitor.yml';$('github').classList.remove('hidden');}
   if(monitor)$('github').classList.add('hidden');
@@ -28,13 +29,17 @@ function render(){
   if(!state.conditions.length)$('conditions').append(el('p','まだ条件がありません。「条件を追加」から登録します。','empty'));
   for(const c of state.conditions){const card=el('article',undefined,'record');card.append(el('h3',c.name),el('span',c.enabled?(pausedAll?'対象（全体停止中）':'監視中'):'停止中','badge '+(c.enabled&&!pausedAll?'':'paused')),el('p',`${c.facility}・${c.room}`),el('p',c.areas.join(' ／ '),'small'),el('p',`${c.weekdays.map(d=>'月火水木金土日'[d]).join('・')}曜 ${tm(c.start)}～${tm(c.end)} ／ 連続${c.minimum/60}時間以上`),el('p',c.rolling?'明日以降の受付中日を自動更新':`${c.dateFrom} ～ ${c.dateTo}`,'small'),el('p',`最終確認 ${dt(c.lastCheck)} ／ 正常取得 ${dt(c.lastSuccess)} ／ 確認済み日数 ${c.scopeCount} / ${c.scheduledDays??'—'}`,'small'));
     if(c.closedDates?.length)card.append(el('p',`休館で通知対象外：${c.closedDates.filter(d=>d>new Date(Date.now()+9*3600000).toISOString().slice(0,10)).join('、')}`,'small'));
-    if(c.error)card.append(el('p',`取得エラー（連続${c.failures}回）：${c.error}。前回の正常結果を保持しています。`,'error'));
+    if(c.error)card.append(el('p',`現在の取得エラー（連続${c.failures}巡回）：${c.error}。前回の正常結果を保持しています。`,'error'));
     const actions=el('div',undefined,'actions');actions.append(button(c.enabled?'監視を停止':'監視を再開',async()=>{await api('condition-action',{id:c.id,action:'toggle'});await load();}),button('編集',()=>edit(c)),button('削除',async()=>{if(confirm('この監視条件を削除しますか？')){await api('condition-action',{id:c.id,action:'delete'});await load();}},'danger'));card.append(actions);$('conditions').append(card);
   }
   $('windows').replaceChildren();let count=0;
   const today=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
   for(const c of state.conditions)for(const w of c.windows.filter(w=>w.date>today).sort((a,b)=>a.date.localeCompare(b.date)||a.start-b.start)){count++;const d=el('article',undefined,'record');d.append(el('h3',`${w.date} ${tm(w.start)}～${tm(w.end)}`),el('p',`${c.facility}・${c.room}・${w.area}`),el('p',`確認 ${dt(w.checked)} ／ ${c.enabled?'監視中':'停止時の記録'} ／ 同名の別区画がある場合は公式画面でご確認ください`,'small'),link('公式予約サイトを開く ↗','https://www.pf489.com/kasukabe/web/'));$('windows').append(d);}
   if(!count)$('windows').append(el('p','条件に合う空きはまだ記録されていません。取得状況も確認してください。','empty'));
+  $('diagnostics').replaceChildren();
+  const issues=[...(monitor?.recentIssues||[])].reverse().slice(0,20);
+  for(const issue of issues){const d=el('article',undefined,'record');d.append(el('h3',`${issue.facility}${issue.room?'・'+issue.room:''}`),el('p',`${dt(issue.at)} ／ ${issue.resolvedAt?'復旧済み '+dt(issue.resolvedAt):issue.retrying?'再確認待ち':'取得失敗の記録'}`,'small'),el('p',issue.message));if(issue.dates?.length)d.append(el('p',issue.dates.join('、'),'small'));$('diagnostics').append(d);}
+  if(!issues.length)$('diagnostics').append(el('p','この更新以降の取得エラーは記録されていません。','empty'));
   $('events').replaceChildren();for(const e of [...state.events].reverse().slice(0,50)){const d=el('article',undefined,'record');d.append(el('h3',e.title),el('p',`${dt(e.created)} ／ ${{pending:'送信待ち',sending:'送信処理中',sent:'通知サービス受付済み',failed:'送信失敗',grouped:'初回のまとめ通知に集約'}[e.status]||e.status}`,'small'),el('pre',e.body),link('公式予約サイトを開く ↗','https://www.pf489.com/kasukabe/web/'));if(e.error)d.append(el('p',e.error,'error'));$('events').append(d);}if(!state.events.length)$('events').append(el('p','通知履歴はまだありません。','empty'));
 }
 for(const c of catalog){const option=el('option',`${c.facility} ／ ${c.room}`);option.value=c.id;$('catalogId').append(option);}

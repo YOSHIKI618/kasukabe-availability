@@ -34,6 +34,23 @@ export function windowsFor(slots, c) {
   return out;
 }
 export const cellKey = s => `${s.area_key}|${s.start}|${s.end}`;
+const stateCodes={available:'a',booked:'b',outside_application:'o',conditional:'c'};
+function packedSample(c,sample) {
+  const shape=sample.shape;
+  c.layouts??=[];
+  let layout=c.layouts.indexOf(shape);if(layout<0){layout=c.layouts.length;c.layouts.push(shape);}
+  const keys=shape.split('\n');
+  if(keys.some(k=>!stateCodes[sample.cells[k]]))throw Error('前回結果の状態形式が不正です');
+  return {layout,states:keys.map(k=>stateCodes[sample.cells[k]]).join(''),
+    windows:sample.windows.map(({cells,...w})=>w),checked:sample.checked};
+}
+export function compactSamples(state) {
+  for(const c of state.conditions)for(const [date,sample] of Object.entries(c.samples||{})) {
+    if(sample.closed)c.samples[date]={closed:true,windows:[],checked:sample.checked};
+    else if(typeof sample.shape==='string'&&sample.cells)c.samples[date]=packedSample(c,sample);
+  }
+  return state;
+}
 function recordSuccess(c,date,today,now) {
   for(const d of Object.keys(c.samples)) if(d<=today||(!c.rolling&&d>c.dateTo)) delete c.samples[d];
   if(c.errors) {delete c.errors[date];for(const d of Object.keys(c.errors))if(d<=today)delete c.errors[d];}
@@ -48,7 +65,8 @@ export function applyResult(state, input, now=Date.now()) {
   c.lastCheck=now;
   const fail=message=>{
     c.errors??={};c.errors[input.date||'general']=message;
-    c.error=message;c.failures=(c.failures||0)+1;
+    c.error=message;
+    if(!input.cycleId||!c.failures||c.lastFailureCycle!==input.cycleId){c.failures=(c.failures||0)+1;c.lastFailureCycle=input.cycleId||null;}
     if(c.failures>=3 && now-(c.lastErrorNotice||0)>86400000) {
       enqueue(state,{kind:'error',title:'空き状況を確認できません',body:`${c.facility}・${c.room}\n取得失敗が続いています。アプリで状況を確認してください。`,conditionId:c.id},now);
       c.lastErrorNotice=now;
@@ -61,7 +79,7 @@ export function applyResult(state, input, now=Date.now()) {
   if(!c.weekdays.includes(day)) throw Error('対象曜日外の結果です');
   c.samples??={};
   if(input.closed===true) {
-    c.samples[input.date]={closed:true,shape:null,cells:{},windows:[],checked:now};
+    c.samples[input.date]={closed:true,windows:[],checked:now};
     recordSuccess(c,input.date,today,now);return {windows:0,changed:0,closed:true};
   }
   const slots=input.slots;
@@ -75,10 +93,13 @@ export function applyResult(state, input, now=Date.now()) {
   if(!filtered.length || c.areas.some(a=>!filtered.some(s=>s.area===a))) return fail('指定した面区分が表から消えています');
   const shape=filtered.map(cellKey).sort().join('\n');
   const prev=c.samples[input.date];
-  if(prev && !prev.closed && prev.shape!==shape) return fail('表の構成が変わりました。面区分を再確認して条件を保存し直してください');
+  const previousShape=prev?.shape??c.layouts?.[prev?.layout];
+  if(prev && !prev.closed && previousShape!==shape) return fail('表の構成が変わりました。面区分を再確認して条件を保存し直してください');
   const cells=Object.fromEntries(filtered.map(s=>[cellKey(s),s.state]));
   const windows=windowsFor(filtered,c);
-  const changed=windows.filter(w=>w.cells.some(k=>!prev || prev.cells[k]!=='available'));
+  const previousKeys=prev&&!prev.closed&&!prev.cells?new Map(previousShape.split('\n').map((k,i)=>[k,i])):null;
+  const wasAvailable=k=>prev?.cells?prev.cells[k]==='available':previousKeys?prev.states[previousKeys.get(k)]==='a':false;
+  const changed=windows.filter(w=>w.cells.some(k=>!wasAvailable(k)));
   if(changed.length) {
     const lines=changed.map(w=>`${input.date}（${'日月火水木金土'[new Date(input.date+'T00:00:00Z').getUTCDay()]}） ${time(w.start)}～${time(w.end)} ${w.area}`);
     // 暗号化後のPush上限を超えないよう、日付単位の本文も分割する。
@@ -89,7 +110,7 @@ export function applyResult(state, input, now=Date.now()) {
     }
     enqueue(state,{kind:'availability',title:'春日部の施設に空き',body,conditionId:c.id},now);
   }
-  c.samples[input.date]={shape,cells,windows,checked:now};
+  c.samples[input.date]=packedSample(c,{shape,cells,windows,checked:now});
   recordSuccess(c,input.date,today,now);
   return {windows:windows.length, changed:changed.length};
 }
