@@ -6,6 +6,20 @@ const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 export class SiteError extends Error {
   constructor(status,retryAfter='') {super('公開照会の通信に失敗しました');this.status=status;this.retryAfter=retryAfter;}
 }
+export class SiteSessionError extends Error {
+  constructor(){super('予約サイトの照会情報が失効したか、内部エラーが発生しました');this.name='SiteSessionError';this.code='session';}
+}
+const publicPage=url=>{
+  try{const page=new URL(url).pathname.split('/').at(-1);return /^(?:Wg_[A-Za-z]+|StartPage)\.aspx$/i.test(page)?page:'公開照会画面';}catch{return '公開照会画面';}
+};
+function checkSiteUrl(url,source,operation) {
+  const target=new URL(url),base=new URL(OFFICIAL);
+  // 公式が返す既知の終了画面だけを認識する。遷移先へ送信せず新しい照会で復旧する。
+  if(target.origin===base.origin&&!target.username&&!target.password&&target.pathname.toLowerCase()==='/kasukabe/web/internalerror.htm') {
+    const e=new SiteSessionError();e.sitePage=publicPage(source);e.operation=operation;throw e;
+  }
+  if(target.origin!==base.origin||target.username||target.password||!target.pathname.startsWith(base.pathname))throw Error('公式照会サイト外への通信を停止しました');
+}
 export function parsePage(html) {
   const form={fields:{},controls:[],action:'',tables:[]};let table,row,cell;
   const parser=new Parser({
@@ -135,15 +149,17 @@ export class SiteSession {
     const controls=this.form.controls.filter(c=>(c.type||'').toLowerCase()!=='hidden').map(c=>Object.fromEntries(keys.filter(k=>k in c).map(k=>[k,c[k]])));
     return {url:this.url,requests:this.requests,period:this.period,cookies:[...this.cookies],form:{fields:this.form.fields,controls,action:this.form.action}};
   }
-  async read(path=null,data=null) {
+  async read(path=null,data=null,operation='read') {
     if(this.requests)await wait(2000);
     let url=new URL(path||this.form?.action||this.url,this.url).href;
     let method=data?'POST':'GET',body=data?new URLSearchParams(data).toString():undefined;
     for(let i=0;i<10;i++) {
-      if(!url.startsWith(OFFICIAL))throw Error('公式照会サイト外への通信を停止しました');
+      checkSiteUrl(url,this.url,operation);
       const headers={'User-Agent':'KasukabeAvailabilityMonitor/1.0 (personal read-only check)','Cookie':[...this.cookies].map(([k,v])=>k+'='+v).join('; ')};
       if(body)headers['Content-Type']='application/x-www-form-urlencoded';
-      const response=await this.siteFetch(url,{method,body,headers,redirect:'manual',signal:AbortSignal.timeout(35000)});
+      let response;const started=Date.now();
+      try{response=await this.siteFetch(url,{method,body,headers,redirect:'manual',signal:AbortSignal.timeout(35000)});}
+      catch(e){e.sitePage=publicPage(url);e.operation=operation;e.elapsedMs=Date.now()-started;throw e;}
       for(const raw of response.headers.getSetCookie?.()||response.headers.getAll?.('Set-Cookie')||[]) {
         const pair=raw.split(';')[0],at=pair.indexOf('=');if(at>0)this.cookies.set(pair.slice(0,at),pair.slice(at+1));
       }
@@ -153,7 +169,9 @@ export class SiteSession {
         await response.body?.cancel();continue;
       }
       if(!response.ok) {await response.body?.cancel();throw new SiteError(response.status,response.headers.get('Retry-After')||'');}
-      this.html=await response.text();this.url=url;this.form=parsePage(this.html);this.requests++;return;
+      try{this.html=await response.text();}
+      catch(e){e.sitePage=publicPage(url);e.operation=operation;e.elapsedMs=Date.now()-started;throw e;}
+      this.url=url;this.form=parsePage(this.html);this.requests++;return;
     }
     throw Error('画面転送が上限に達しました');
   }
@@ -170,7 +188,7 @@ export class SiteSession {
     if(onclick.includes('__doPostBack'))Object.assign(data,{__EVENTTARGET:c.name,__EVENTARGUMENT:''});
     else if((c.type||'').toLowerCase()==='image') {data[c.name+'.x']='5';data[c.name+'.y']='5';}
     else data[c.name]=c.value||'';
-    await this.read(null,data);
+    await this.read(null,data,id);
   }
   selectDay(target) {
     const key='h_'+target.replaceAll('$','_');

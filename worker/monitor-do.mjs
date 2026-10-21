@@ -13,15 +13,17 @@ const safeError=e=>e instanceof SiteError?'公開照会の通信に失敗しま�
   snapshot:'照会画面の状態が保存上限に達しました',stopped:'定期確認を停止しました'
 }[e.code]||'クラウドの確認処理でエラーが発生しました':'公開照会の取得・解析に失敗しました。前回の正常結果を保持しています';
 // 公開照会の実行環境の互換性診断。URLや長い状態値を保存・表示しない。
-const diagnostic=e=>({name:String(e.name).slice(0,40),message:String(e.message).replace(/https?:\/\/\S+|[A-Za-z0-9_+/=-]{40,}/g,'[省略]').slice(0,180)});
+const diagnostic=e=>({name:String(e.name).slice(0,40),message:String(e.message).replace(/https?:\/\/\S+|[A-Za-z0-9_+/=-]{40,}/g,'[省略]').slice(0,180),
+  ...(e.sitePage?{sitePage:String(e.sitePage).slice(0,60)}:{}),...(e.operation?{operation:String(e.operation).slice(0,50)}:{}),...(Number.isFinite(e.elapsedMs)?{elapsedMs:e.elapsedMs}:{})});
 export function errorKind(e) {
   if(e instanceof SiteError)return [403,429].includes(e.status)?'restricted':e.status===408||e.status>=500?'http_temporary':'http';
   if(e?.code==='api')return 'storage';
+  if(e?.code==='session')return 'session';
   if(['site_budget','phase_budget','run_budget','snapshot'].includes(e?.code))return 'budget';
   if(['AbortError','TimeoutError'].includes(e?.name)||/fetch failed|network|connection|timed? ?out|aborted/i.test(e?.message||''))return 'network';
   return 'parse';
 }
-const explained=e=>({network:'予約サイトとの通信が時間切れ、または一時的に切断されました',http_temporary:'予約サイトが一時的な通信エラーを返しました',restricted:'予約サイトのアクセス制限を検出したため確認を中断しました',storage:'確認結果の保存先との通信に失敗しました',budget:safeError(e),http:safeError(e),parse:'予約サイトの表示を判定できません：'+diagnostic(e).message}[errorKind(e)]);
+const explained=e=>({network:'予約サイトとの通信が時間切れ、または一時的に切断されました',http_temporary:'予約サイトが一時的な通信エラーを返しました',session:'予約サイトの照会情報が失効したか、内部エラー画面が返されました',restricted:'予約サイトのアクセス制限を検出したため確認を中断しました',storage:'確認結果の保存先との通信に失敗しました',budget:safeError(e),http:safeError(e),parse:'予約サイトの表示を判定できません：'+diagnostic(e).message}[errorKind(e)]);
 
 // 1人用に名前を固定し、本番のObjectは1個だけ作る。SQLite型の無料枠を利用。
 export class AvailabilityMonitor {
@@ -30,7 +32,7 @@ export class AvailabilityMonitor {
   async changeMeta(fn) {return this.ctx.storage.transaction(async tx=>{const m=await tx.get('meta')||fresh(),before=JSON.stringify(m);if(m.recentIssues)m.recentIssues=m.recentIssues.filter(x=>x.at>this.now()-14*86400000);fn(m);if(JSON.stringify(m)!==before)await tx.put('meta',m);return m;});}
   async status() {
     const m=await this.meta(),job=await this.ctx.storage.get('job');
-    return {...m,implementation:'2026-10-16.2',retryAt:job?.phaseRetryAt||null,running:Boolean(job),notifyOnly:job?.notifyOnly||false,conditionIndex:job?.conditionIndex||0,conditionCount:job?.plans.length||0,
+    return {...m,implementation:'2026-10-22.1',retryAt:job?.phaseRetryAt||null,running:Boolean(job),notifyOnly:job?.notifyOnly||false,conditionIndex:job?.conditionIndex||0,conditionCount:job?.plans.length||0,
       siteRequests:await this.ctx.storage.get('siteCount')||0,alarmAt:await this.ctx.storage.getAlarm()};
   }
   async fetch(req) {
@@ -121,7 +123,8 @@ export class AvailabilityMonitor {
       const item=catalog.find(i=>i.id===c.catalogId);if(!item)throw new MonitorError('api');
       const condition=Object.fromEntries(['id','catalogId','revision','areas','weekdays','start','end','minimum','rolling','dateFrom','dateTo','name','facility','room'].map(k=>[k,c[k]]));
       const recentLargeFailure=(meta.recentIssues||[]).some(e=>e.conditionId===c.id&&(e.dates||[]).length>4&&['network','http_temporary'].includes(e.code)&&e.at>this.now()-24*HOUR);
-      const days=targetDays(condition,item,this.now()),small=(meta.smallBatchUntil?.[item.id]||0)>this.now()||recentLargeFailure;
+      // 公民館の1か月一覧は実サイトで35秒超を再現。時間経過で重い表示へ戻さない。
+      const days=targetDays(condition,item,this.now()),small=!item.sports||(meta.smallBatchUntil?.[item.id]||0)>this.now()||recentLargeFailure;
       return {condition,item,period:small?'rbtnTwoWeek':'rbtnMonth',groups:batches(days,small?14:28,small?4:8),days:days.length,end:acceptanceEnd(item.sports,this.now())};
     });
     this.job={owner:start.owner,started:this.now(),notifyOnly,plans,conditionIndex:0,groupIndex:0,siteRequests:0,
@@ -163,7 +166,7 @@ export class AvailabilityMonitor {
         await this.savePacked('session',snapshot);await this.savePacked('pending',pending);
       } catch(e) {
         if(e instanceof MonitorError&&e.code==='stopped')throw e;
-        const retryable=['network','http_temporary'].includes(errorKind(e));
+        const retryable=['network','http_temporary','session'].includes(errorKind(e));
         await this.issue(e,c,days,retryable&&!job.groupRetry);
         if(retryable&&!job.groupRetry) {
           job.groupRetry=1;job.phaseRetryAt=this.now()+30000;await this.ctx.storage.delete('session');
