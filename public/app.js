@@ -1,15 +1,30 @@
+import {groupAvailability,durationLabel} from './ui-model.mjs';
 const $=id=>document.getElementById(id);
 const catalog=await (await fetch('/catalog.json')).json();
 let state;
+let currentView=null,homeScroll=0;
+const settingsAnchors=new Set(['settings','conditionsSection','notificationSettings','cloudSettings','diagnosticsSection','notificationHistory','helpSection']);
+function syncView(navigate=false){
+  if($('app').classList.contains('hidden'))return;
+  const target=location.hash.slice(1),settings=settingsAnchors.has(target),changed=currentView!==(settings?'settings':'availability');
+  $('availabilityView').classList.toggle('hidden',settings);$('settingsView').classList.toggle('hidden',!settings);
+  $('openSettings').setAttribute('aria-expanded',String(settings));currentView=settings?'settings':'availability';
+  if(navigate)requestAnimationFrame(()=>{
+    if(settings&&target!=='settings'){$(target)?.scrollIntoView({behavior:'instant',block:'start'});return;}
+    if(settings||changed){$(settings?'settingsTitle':'availabilityTitle').focus({preventScroll:true});window.scrollTo({top:settings?0:homeScroll,behavior:'instant'});}
+  });
+}
+function openSettings(target='settings'){if(currentView!=='settings')homeScroll=window.scrollY;if(location.hash==='#'+target)syncView(true);else location.hash=target;}
+window.addEventListener('hashchange',()=>syncView(true));
 const el=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
 const dt=t=>t?new Date(t).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}):'未確認';
 const tm=m=>`${Math.floor(m/60)}:${String(m%60).padStart(2,'0')}`;
 function message(text,error=false){$('message').textContent=text;$('message').className=error?'error':'';}
-async function api(path,data){const r=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json'},body:data===undefined?undefined:JSON.stringify(data)});const b=await r.json();if(!r.ok){if(r.status===401){$('app').classList.add('hidden');$('login').classList.remove('hidden');}throw Error(b.error||'通信に失敗しました');}return b;}
+async function api(path,data){const r=await fetch('/api/'+path,{method:data===undefined?'GET':'POST',headers:data===undefined?{}:{'Content-Type':'application/json'},body:data===undefined?undefined:JSON.stringify(data)});const b=await r.json();if(!r.ok){if(r.status===401){$('app').classList.add('hidden');$('login').classList.remove('hidden');$('openSettings').classList.add('hidden');}throw Error(b.error||'通信に失敗しました');}return b;}
 async function run(fn){try{await fn();}catch(e){message(e.message,true);}}
 function button(text,fn,cls='secondary'){const b=el('button',text,cls);b.type='button';b.onclick=()=>run(fn);return b;}
 function link(text,url){const a=el('a',text);a.href=url;a.target='_blank';a.rel='noopener';return a;}
-async function load(){state=await api('state');$('login').classList.add('hidden');$('app').classList.remove('hidden');render();}
+async function load(){state=await api('state');$('login').classList.add('hidden');$('app').classList.remove('hidden');$('openSettings').classList.remove('hidden');render();syncView();}
 function render(){
   const monitor=state.monitor,automatic=monitor?state.lastCloudflareRunner:state.lastGithubScheduledRunner||state.lastScheduledRunner;
   const pausedAll=monitor&&!monitor.enabled;
@@ -17,6 +32,10 @@ function render(){
   const retry=monitor?.retryAt&&monitor.retryAt>Date.now()?`一時的な失敗のため ${dt(monitor.retryAt)} に再確認します。`:'';
   const progress=monitor?.running?(monitor.notifyOnly?'通知を配信中です。':monitor.conditionCount?`確認中：${Math.min(monitor.conditionIndex+1,monitor.conditionCount)} / ${monitor.conditionCount}条件。`:'保存した条件を確認しています。'):'';
   $('next').textContent=monitor?(pausedAll?'「定期確認を再開」で保存した条件の確認を始めます。':retry+progress+`次回の目安 ${dt(monitor.nextMonitorAt)}。約1時間ごとに確認し、PCの起動は不要です。`):state.schedulerReady?'次回は毎時57分ごろ（遅延あり）。PCの起動は不要です。':'クラウドの定期実行を設置・検証中です。画面には検証時の取得結果を表示しています。';
+  $('settingsHealth').textContent=$('health').textContent;$('settingsNext').textContent=$('next').textContent;
+  if(monitor)$('next').textContent=pausedAll?'設定から定期確認を再開できます。':retry||progress+`次回 ${dt(monitor.nextMonitorAt)} ／ 約1時間ごと`;
+  const attention=!state.schedulerReady||Boolean(monitor?.lastError||state.runnerError)||state.conditions.some(c=>c.error)||Boolean(automatic&&Date.now()-automatic>100*60000);
+  $('healthDot').classList.toggle('warning',pausedAll||attention);$('settingsAlert').classList.toggle('hidden',!attention);
   $('monitorControls').classList.toggle('hidden',!monitor);$('pauseAll').classList.toggle('hidden',!monitor?.enabled);$('resumeAll').classList.toggle('hidden',Boolean(monitor?.enabled));
   if(state.githubUrl){$('github').href=state.githubUrl+'/actions/workflows/monitor.yml';$('github').classList.remove('hidden');}
   if(monitor)$('github').classList.add('hidden');
@@ -32,10 +51,29 @@ function render(){
     if(c.error)card.append(el('p',`現在の取得エラー（連続${c.failures}巡回）：${c.error}。前回の正常結果を保持しています。`,'error'));
     const actions=el('div',undefined,'actions');actions.append(button(c.enabled?'監視を停止':'監視を再開',async()=>{await api('condition-action',{id:c.id,action:'toggle'});await load();}),button('編集',()=>edit(c)),button('削除',async()=>{if(confirm('この監視条件を削除しますか？')){await api('condition-action',{id:c.id,action:'delete'});await load();}},'danger'));card.append(actions);$('conditions').append(card);
   }
-  $('windows').replaceChildren();let count=0;
+  $('windows').replaceChildren();
   const today=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
-  for(const c of state.conditions)for(const w of c.windows.filter(w=>w.date>today).sort((a,b)=>a.date.localeCompare(b.date)||a.start-b.start)){count++;const d=el('article',undefined,'record');d.append(el('h3',`${w.date} ${tm(w.start)}～${tm(w.end)}`),el('p',`${c.facility}・${c.room}・${w.area}`),el('p',`確認 ${dt(w.checked)} ／ ${c.enabled?'監視中':'停止時の記録'} ／ 同名の別区画がある場合は公式画面でご確認ください`,'small'),link('公式予約サイトを開く ↗','https://www.pf489.com/kasukabe/web/'));$('windows').append(d);}
-  if(!count)$('windows').append(el('p','条件に合う空きはまだ記録されていません。取得状況も確認してください。','empty'));
+  const groups=groupAvailability(state.conditions,today),count=groups.reduce((sum,g)=>sum+g.entries.length,0);
+  $('availableCount').textContent=String(count);$('dateCount').textContent=groups.length?`／ ${groups.length}日分`:'';
+  for(const group of groups){
+    const [year,month,day]=group.date.split('-').map(Number),weekday=new Date(group.date+'T00:00:00Z').getUTCDay();
+    const section=el('section',undefined,'date-group');section.dataset.date=group.date;
+    const heading=el('div',undefined,'date-heading'),title=el('div',undefined,'date-title'),h=el('h2',`${month}月${day}日`);h.id='date-'+group.date;
+    title.append(h,el('span','日月火水木金土'[weekday],'weekday'+(weekday===0?' sunday':'')),el('span',`${year}年`,'date-year'));
+    heading.append(title,el('span',`${group.entries.length}件`,'date-count'));section.setAttribute('aria-labelledby',h.id);
+    const slots=el('div',undefined,'slot-list');
+    for(const {condition:c,window:w} of group.entries){
+      const card=el('article',undefined,'slot-card');card.dataset.date=w.date;card.dataset.start=String(w.start);card.dataset.condition=c.id;
+      const top=el('div',undefined,'slot-top'),time=el('div',undefined,'slot-time');time.append(document.createTextNode(tm(w.start).padStart(5,'0')),el('span','–','time-dash'),document.createTextNode(tm(w.end).padStart(5,'0')));
+      top.append(time,el('span',durationLabel(w.end-w.start),'duration'));
+      card.append(top,el('h3',c.facility),el('p',`${c.room} ・ ${c.enabled?(pausedAll?'全体停止中':'監視中'):'停止時の記録'}`,'slot-room'),el('p',w.area,'slot-area'));
+      if(c.error)card.append(el('p','取得エラーのため、前回の正常な結果を表示しています。','slot-warning'));
+      const foot=el('div',undefined,'slot-footer'),meta=el('div',undefined,'slot-meta');meta.append(el('div',`確認 ${dt(w.checked)}`),el('div','同名の別区画は公式画面で確認'));
+      foot.append(meta,link('公式で確認 ↗','https://www.pf489.com/kasukabe/web/'));card.append(foot);slots.append(card);
+    }
+    section.append(heading,slots);$('windows').append(section);
+  }
+  if(!count){const empty=el('div',undefined,'empty availability-empty');empty.append(el('div','▦','empty-icon'),el('h2','条件に合う空きはまだ記録されていません'),el('p','正常取得の日時もご確認ください。空きが出ると、この一覧に表示します。'),button('監視条件・取得状況を見る',()=>openSettings('conditionsSection')));$('windows').append(empty);}
   $('diagnostics').replaceChildren();
   const issues=[...(monitor?.recentIssues||[])].reverse().slice(0,20);
   for(const issue of issues){const d=el('article',undefined,'record');d.append(el('h3',`${issue.facility}${issue.room?'・'+issue.room:''}`),el('p',`${dt(issue.at)} ／ ${issue.resolvedAt?'復旧済み '+dt(issue.resolvedAt):issue.retrying?'再確認待ち':'取得失敗の記録'}`,'small'),el('p',issue.message));if(issue.dates?.length)d.append(el('p',issue.dates.join('、'),'small'));$('diagnostics').append(d);}
@@ -46,6 +84,7 @@ for(const c of catalog){const option=el('option',`${c.facility} ／ ${c.room}`);
 for(let d=0;d<7;d++){const label=el('label',undefined,'check');const input=document.createElement('input');input.type='checkbox';input.value=d;input.name='weekday';input.checked=d>=5;label.append(input,document.createTextNode('月火水木金土日'[d]));$('weekdays').append(label);}
 function areas(selected){const item=catalog.find(c=>c.id===$('catalogId').value);$('areaChoices').replaceChildren();for(const area of item.areas){const label=el('label',undefined,'check');const input=document.createElement('input');input.type='checkbox';input.name='area';input.value=area;input.checked=selected?selected.includes(area):true;label.append(input,document.createTextNode(area));$('areaChoices').append(label);}$('areaNote').textContent=item.pendingAreas.length?`バドミントン用途を以前の調査で確認した区分を使用します。大区画など、用途の追加確認が必要な区分は現在対象外です：${item.pendingAreas.join('、')}。`:'表示名は公式画面の区分に合わせています。設備・用途の条件は公式サイトでも確認してください。';}
 $('catalogId').onchange=()=>areas();areas();
+$('openSettings').onclick=()=>openSettings();$('statusSettings').onclick=()=>openSettings('cloudSettings');$('backHome').onclick=()=>{location.hash='';};
 function edit(c){$('conditionForm').reset();$('conditionId').value=c?.id||'';$('name').value=c?.name||'';$('catalogId').value=c?.catalogId||catalog[0].id;areas(c?.areas);for(const box of document.querySelectorAll('[name=weekday]'))box.checked=c?c.weekdays.includes(Number(box.value)):Number(box.value)>=5;$('start').value=c?tm(c.start).padStart(5,'0'):'09:00';$('end').value=c?tm(c.end).padStart(5,'0'):'19:00';$('minimum').value=c?.minimum||120;const tomorrow=new Date(Date.now()+9*3600000+86400000).toISOString().slice(0,10);$('dateFrom').value=c?.dateFrom||tomorrow;$('dateTo').value=c?.dateTo||new Date(new Date(tomorrow).getTime()+90*86400000).toISOString().slice(0,10);$('enabled').checked=c?.enabled||false;$('rolling').checked=c?.rolling??true;period();$('editorTitle').textContent=c?'監視条件を編集':'監視条件を追加';$('editor').classList.remove('hidden');$('editor').scrollIntoView({behavior:'smooth'});}
 function period(){$('dateFrom').disabled=$('rolling').checked;$('dateTo').disabled=$('rolling').checked;}$('rolling').onchange=period;$('add').onclick=()=>edit();$('cancel').onclick=()=>$('editor').classList.add('hidden');
 $('conditionForm').onsubmit=e=>{e.preventDefault();run(async()=>{const mins=id=>{const [h,m]=$(id).value.split(':').map(Number);return h*60+m;};await api('conditions',{id:$('conditionId').value||undefined,name:$('name').value,catalogId:$('catalogId').value,areas:[...document.querySelectorAll('[name=area]:checked')].map(x=>x.value),weekdays:[...document.querySelectorAll('[name=weekday]:checked')].map(x=>Number(x.value)),start:mins('start'),end:mins('end'),minimum:Number($('minimum').value),dateFrom:$('dateFrom').value,dateTo:$('dateTo').value,rolling:$('rolling').checked,enabled:$('enabled').checked});$('editor').classList.add('hidden');message('クラウドに保存しました。開始した条件は次の定期確認から使われます。');await load();});};
